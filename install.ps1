@@ -186,10 +186,14 @@ if (-not $SkipClaudeCode) {
 if (-not $SkipProfile) {
     Info "Installing ccp into $PROFILE ..."
     $snippetUrl = "$PagesBaseUrl/profile-snippet.ps1"
+    $snippetTmp = Join-Path $env:TEMP "gc2cc-snippet-$(Get-Random).ps1"
     try {
-        $snippet = (Invoke-WebRequest -Uri $snippetUrl -UseBasicParsing).Content
+        Invoke-WebRequest -Uri $snippetUrl -OutFile $snippetTmp -UseBasicParsing
+        $snippet = Get-Content $snippetTmp -Raw
     } catch {
         Die "Could not fetch $snippetUrl : $_"
+    } finally {
+        Remove-Item $snippetTmp -Force -ErrorAction SilentlyContinue
     }
 
     $profilePath = $PROFILE
