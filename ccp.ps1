@@ -1,44 +1,117 @@
-# ccp -- claude YOLO mode routed through copilot-api on http://localhost:4141.
+# ccp -- claude YOLO mode routed through caozhiyuan/copilot-api on http://localhost:4141.
 # PATH-mounted standalone script (no profile required). Works the same in PS5.1,
 # PS7, and any host: drop it under %LOCALAPPDATA%\gc2cc\bin\ (added to user PATH
 # by gc2cc/install.ps1), and `ccp ...` resolves from any shell.
 $base = 'http://localhost:4141'
 
 try {
-    Invoke-WebRequest "$base/v1/models" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null
+    $raw = (Invoke-WebRequest "$base/v1/models" -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop).Content
 } catch {
     Write-Error "[ccp] copilot-api not reachable at $base. Check: Get-Service gc2cc-copilot-api"
     return
 }
 
-# [1m] suffix is consumed by Claude Code locally (case-insensitive match to enable 1M-context
-# UI/budget) and stripped by bakapiano/copilot-api before forwarding to GitHub Copilot.
-$models = @(
-    @{ id = 'claude-opus-4.7[1m]';      small = 'claude-haiku-4.5'       },
-    @{ id = 'claude-opus-4.7';          small = 'claude-haiku-4.5'       },
-    @{ id = 'gemini-3.1-pro-preview';   small = 'gemini-3-flash-preview' },
-    @{ id = 'claude-sonnet-4.5';        small = 'claude-haiku-4.5'       },
-    @{ id = 'claude-opus-4.5';          small = 'claude-haiku-4.5'       },
-    @{ id = 'claude-haiku-4.5';         small = 'claude-haiku-4.5'       },
-    @{ id = 'gpt-5.2';                  small = 'gpt-5-mini'             },
-    @{ id = 'gpt-5-mini';               small = 'gpt-5-mini'             },
-    @{ id = 'gemini-2.5-pro';           small = 'gemini-3-flash-preview' },
-    @{ id = 'gemini-3-flash-preview';   small = 'gemini-3-flash-preview' },
-    @{ id = 'gpt-4.1';                  small = 'gpt-4o-mini'            }
+# /v1/models lists everything the upstream Copilot account can see, including
+# embeddings and Microsoft-internal routers. Trim the menu to what's actually
+# useful as a chat backend.
+#
+# Filter rules (in order):
+#   - Drop owned_by Experimental / Fireworks (router shims, not chat-usable).
+#   - Drop ids that look like embedding models or routers by name.
+#   - Drop legacy / snapshotted variants (date suffixes, prior generations).
+#   - Strip the [1m]/-1m/-1m-internal/-high/-xhigh suffixes the proxy advertises:
+#     the [1m] suffix exists so Claude Code's UI marks the model as 1M-capable,
+#     and -high/-xhigh reflect server-side reasoning effort -- neither should
+#     be in our chosen ANTHROPIC_MODEL id. Per caozhiyuan's README:
+#       "When using with Claude Code, please configure the model ID as
+#       `claude-opus-4-6` or `claude-opus-4.6` (without the `[1m]` suffix,
+#       exceeding GitHub Copilot's context window limit too much may lead to
+#       being banned)."
+#     The proxy still gates 1M behavior on the underlying model's capabilities,
+#     so dropping the suffix doesn't lose anything functional.
+$drop = @(
+    '^accounts/msft/',                       # router shims
+    '^text-embedding-',                      # embeddings
+    '-embedding\b', '-inference$',           # other embedding namings
+    '^gpt-3\.5', '^gpt-4-0', '^gpt-4-o-',    # ancient chat models
+    '^gpt-4o-2024-', '^gpt-4o-mini-2024-', '^gpt-4\.1-2025-',  # dated snapshots
+    '^gpt-4$',                               # plain gpt-4 (ancient)
+    '^gpt-41-copilot$',                      # legacy GH-internal
+    '^claude-(opus|sonnet)-4\.5$',           # superseded by 4.6/4.7
+    '^gemini-2\.5-'                          # superseded by 3.x
 )
+$dropOwners = @('Experimental','Fireworks')
 
-Write-Host ''
-Write-Host 'Pick a model:' -ForegroundColor Cyan
-for ($i = 0; $i -lt $models.Count; $i++) {
-    Write-Host ('  [{0,2}] {1}' -f ($i + 1), $models[$i].id)
+$stripSuffix = '(?:\[1m\]|-1m(?:-internal)?|-(high|xhigh))$'
+
+$models = ($raw | ConvertFrom-Json).data | ForEach-Object {
+    if ($dropOwners -contains $_.owned_by) { return }
+    foreach ($p in $drop) { if ($_.id -match $p) { return } }
+    # Strip suffixes iteratively: caozhiyuan/copilot-api's /v1/models adds a
+    # `[1m]` marker on top of any model whose upstream id already ends in
+    # `-1m` or `-1m-internal`, so we need two passes to canonicalize ids
+    # like `claude-opus-4.6-1m[1m]` -> `claude-opus-4.6`.
+    $clean = $_.id
+    while ($clean -match $stripSuffix) { $clean = $clean -replace $stripSuffix, '' }
+    [pscustomobject]@{
+        id    = $clean
+        owner = $_.owned_by
+    }
+} | Sort-Object id -Unique
+
+if (-not $models -or $models.Count -eq 0) {
+    Write-Warning '[ccp] no models matched after filtering. Falling back to free-form prompt.'
+    $main = Read-Host 'Enter model id'
+    if ([string]::IsNullOrWhiteSpace($main)) { return }
+} else {
+    # Sort: preferred families first, then by id.
+    function Rank($id) {
+        switch -regex ($id) {
+            '^claude-opus-4\.7'  { return 0 }
+            '^claude-opus-4\.6'  { return 1 }
+            '^gpt-5\.5'          { return 2 }
+            '^gpt-5\.4'          { return 3 }
+            '^gpt-5\.3'          { return 4 }
+            '^gpt-5\.2'          { return 5 }
+            '^claude-sonnet-4\.' { return 6 }
+            '^gemini-3\.'        { return 7 }
+            '^gemini-'           { return 8 }
+            '^claude-haiku-'     { return 9 }
+            '^gpt-5-mini'        { return 10 }
+            '^gpt-4\.'           { return 11 }
+            default              { return 99 }
+        }
+    }
+    $models = $models | Sort-Object @{e={Rank $_.id}}, id
+
+    Write-Host ''
+    Write-Host 'Pick a model:' -ForegroundColor Cyan
+    for ($i = 0; $i -lt $models.Count; $i++) {
+        Write-Host ('  [{0,2}] {1}' -f ($i + 1), $models[$i].id)
+    }
+    $pick = Read-Host 'Number (default 1)'
+    if ([string]::IsNullOrWhiteSpace($pick)) { $pick = '1' }
+    $idx = [int]$pick - 1
+    if ($idx -lt 0 -or $idx -ge $models.Count) { Write-Error '[ccp] invalid choice'; return }
+    $main = $models[$idx].id
 }
-$pick = Read-Host 'Number (default 1)'
-if ([string]::IsNullOrWhiteSpace($pick)) { $pick = '1' }
-$idx = [int]$pick - 1
-if ($idx -lt 0 -or $idx -ge $models.Count) { Write-Error '[ccp] invalid choice'; return }
-$main  = $models[$idx].id
-$small = $models[$idx].small
 
+# Heuristic small/fast model by family. Prefer in-family small models so the
+# main and small share token-count semantics. Fall back to gpt-5-mini.
+function Pick-Small($id) {
+    switch -regex ($id) {
+        '^claude-' { return 'claude-haiku-4.5' }
+        '^gpt-5'   { return 'gpt-5-mini' }
+        '^gpt-4'   { return 'gpt-4o-mini' }
+        '^gemini-' { return 'gemini-3-flash-preview' }
+        default    { return 'gpt-5-mini' }
+    }
+}
+$small = Pick-Small $main
+
+# Per caozhiyuan README, set both the main slots and the haiku slot. We
+# intentionally pass model ids WITHOUT the [1m] suffix per the author's
+# ban-risk warning quoted above.
 $env:ANTHROPIC_BASE_URL                       = $base
 $env:ANTHROPIC_AUTH_TOKEN                     = 'dummy'
 $env:ANTHROPIC_MODEL                          = $main

@@ -4,14 +4,18 @@
     Installs gc2cc: GitHub Copilot -> Claude Code bridge on Windows.
 
 .DESCRIPTION
-    - Installs prereqs (git, node, bun) via winget if missing.
-    - Clones bakapiano/copilot-api at branch feat/1m-suffix into %LOCALAPPDATA%\gc2cc\copilot-api.
-    - Runs `bun install` and the interactive GitHub Copilot device-code auth flow (once).
-    - Registers a Windows Service `gc2cc-copilot-api` via NSSM that runs the proxy
-      as LocalSystem, auto-restarts on crash, and rotates logs natively.
+    - Installs prereqs (git, node) via winget if missing. (No longer needs bun.)
+    - Installs caozhiyuan/copilot-api globally via npm (`@jeffreycao/copilot-api`).
+    - Runs the interactive GitHub Copilot device-code auth flow once.
+    - Registers a Windows Service `gc2cc-copilot-api` via NSSM that runs the
+      proxy as LocalSystem, auto-restarts on crash, and rotates logs natively.
     - Installs @anthropic-ai/claude-code globally.
-    - Drops `ccp.ps1` + `ccp.cmd` into %LOCALAPPDATA%\gc2cc\bin\ and adds that dir
-      to user PATH so `ccp` works from any shell (PS5.1, PS7, VSCode terminal, cmd).
+    - Drops `ccp.ps1` + `ccp.cmd` into %LOCALAPPDATA%\gc2cc\bin\ and adds that
+      dir to user PATH so `ccp` works from any shell (PS5.1, PS7, cmd, VSCode).
+
+    Upgrade-safe: removes legacy Scheduled Task (pre-NSSM), legacy bakapiano
+    git clone (pre-caozhiyuan), and stops + re-registers the NSSM service so
+    re-running install over any prior gc2cc install converges cleanly.
 
 .NOTES
     Requires Administrator (NSSM service registration writes to HKLM and the SCM).
@@ -22,8 +26,7 @@ param(
     [int]    $Port         = 4141,
     [string] $ServiceName  = 'gc2cc-copilot-api',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
-    [string] $RepoUrl      = 'https://github.com/bakapiano/copilot-api',
-    [string] $RepoBranch   = 'feat/1m-suffix',
+    [string] $NpmPackage   = '@jeffreycao/copilot-api@latest',
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
     # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
@@ -96,8 +99,7 @@ if (-not $isAdmin) {
                  '-Port',$Port,
                  '-ServiceName',$ServiceName,
                  '-InstallDir',"`"$InstallDir`"",
-                 '-RepoUrl',$RepoUrl,
-                 '-RepoBranch',$RepoBranch,
+                 '-NpmPackage',"`"$NpmPackage`"",
                  '-PagesBaseUrl',$PagesBaseUrl,
                  '-NssmZipUrl',$NssmZipUrl,
                  '-NssmUpstreamUrl',$NssmUpstreamUrl,
@@ -111,17 +113,15 @@ if (-not $isAdmin) {
 }
 
 # ---------- 1. layout ----------
-$ProxyDir = Join-Path $InstallDir 'copilot-api'
-$LogDir   = Join-Path $InstallDir 'logs'
-$BinDir   = Join-Path $InstallDir 'bin'
+$LogDir = Join-Path $InstallDir 'logs'
+$BinDir = Join-Path $InstallDir 'bin'
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $LogDir, $BinDir | Out-Null
 
 # Capture elevated install output for post-mortem debugging if anything fails.
-# Doesn't interfere with normal console output; lives until next install run.
 $installTranscript = Join-Path $LogDir 'install.log'
 try { Start-Transcript -Path $installTranscript -Force -ErrorAction Stop | Out-Null } catch {}
-Info "Install root: $InstallDir (running elevated as $env:USERNAME, install pinned to $UserHome)"
+Info "Install root: $InstallDir (elevated as $env:USERNAME, pinned to $UserHome)"
 
 # ---------- 2. prereqs ----------
 # winget ships with Win10 1809+ / Win11 by default. If it's somehow missing,
@@ -140,9 +140,9 @@ Ensure-Cmd 'winget' {
         Repair-WinGetPackageManager
     }
 }
-Ensure-Cmd 'git'    { winget install --id Git.Git       -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
 Ensure-Cmd 'node'   { winget install --id OpenJS.NodeJS -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
-Ensure-Cmd 'bun'    { winget install --id Oven-sh.Bun   -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
+# git is no longer required (we used to git clone bakapiano), but is harmless
+# if already present. Don't install it just for gc2cc.
 
 # ---------- 3. nssm ----------
 # Our GitHub Release hosts a vendored copy of nssm-2.24.zip; upstream nssm.cc
@@ -183,46 +183,75 @@ if (-not (Test-Path $nssm)) {
 }
 Ok "nssm: $nssm"
 
-# ---------- 4. clone or update proxy ----------
-if (Test-Path (Join-Path $ProxyDir '.git')) {
-    Info "Updating proxy from $RepoUrl@$RepoBranch ..."
-    git -C $ProxyDir fetch origin $RepoBranch --quiet
-    git -C $ProxyDir reset --hard "origin/$RepoBranch" --quiet
-} else {
-    Info "Cloning $RepoUrl@$RepoBranch ..."
-    # --quiet: without it, git writes "Cloning into '...'" to stderr, and PS 5.1
-    # under ErrorActionPreference=Stop promotes that to a terminating
-    # NativeCommandError. The fetch line above uses the same flag for the
-    # same reason.
-    git clone --quiet -b $RepoBranch --depth 1 $RepoUrl $ProxyDir 2>&1 | Out-Null
+# ---------- 4. install copilot-api globally (replaces the old git clone) ----------
+# We install into a *system-wide* npm prefix under $InstallDir so the NSSM
+# service running as LocalSystem can always find the CLI on a known path,
+# without depending on the user's per-account npm prefix.
+$NpmRoot   = Join-Path $InstallDir 'npm'
+$NpmGlobal = Join-Path $NpmRoot 'global'
+$NpmCache  = Join-Path $NpmRoot 'cache'
+New-Item -ItemType Directory -Force -Path $NpmGlobal, $NpmCache | Out-Null
+
+Info "Installing $NpmPackage into $NpmGlobal ..."
+# --prefix scopes the global install to our directory. Suppress fund/audit
+# noise; -s would also suppress real errors so we keep them.
+#
+# npm writes warnings (unknown config keys, deprecations) to stderr. PS 5.1
+# with ErrorActionPreference=Stop promotes that stderr write to a terminating
+# NativeCommandError that kills the install before we can check $LASTEXITCODE.
+# Locally relax to Continue and rely on the exit code for the real verdict.
+$prev = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & npm install -g $NpmPackage `
+        --prefix $NpmGlobal `
+        --cache $NpmCache `
+        --no-fund --no-audit 2>&1 | Out-Null
+} finally {
+    $ErrorActionPreference = $prev
+}
+if ($LASTEXITCODE -ne 0) {
+    Die "npm install $NpmPackage failed (exit=$LASTEXITCODE). See $installTranscript."
 }
 
-Info 'bun install...'
-Push-Location $ProxyDir
-try { bun install --silent } finally { Pop-Location }
+# The .cmd shim Windows uses; this is what NSSM ultimately exec's via node.exe
+$copilotCmd = Join-Path $NpmGlobal 'copilot-api.cmd'
+if (-not (Test-Path $copilotCmd)) {
+    # Some npm versions on Windows install under node_modules/.bin instead.
+    $alt = Join-Path $NpmGlobal 'node_modules\.bin\copilot-api.cmd'
+    if (Test-Path $alt) { $copilotCmd = $alt }
+}
+if (-not (Test-Path $copilotCmd)) { Die "copilot-api shim not found under $NpmGlobal after install" }
+
+# The actual JS entrypoint -- we exec node + this directly under NSSM (cleaner
+# process tree than going through a .cmd shim under a service).
+$copilotEntry = Join-Path $NpmGlobal 'node_modules\@jeffreycao\copilot-api\dist\main.js'
+if (-not (Test-Path $copilotEntry)) {
+    # Fallback: walk the .cmd shim to find what it execs.
+    $copilotEntry = $null
+    Warn "Expected entry $($copilotEntry) not found; service will exec via .cmd shim instead."
+}
+Ok "copilot-api installed: $copilotCmd"
+
+$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $nodeExe) { Die "node.exe not on PATH even after Ensure-Cmd; aborting." }
 
 # ---------- 5. GitHub Copilot auth (interactive, once) ----------
-# Auth lives under the *invoking* user's home; the elevated process still has
-# our SID so $UserHome resolves correctly. The service later overrides USERPROFILE
-# in its env block so LocalSystem can find this same token.
+# Token lives under the *invoking* user's home; both bakapiano and caozhiyuan
+# use the same default path (~/.local/share/copilot-api/github_token), so an
+# existing auth from a previous gc2cc install carries over with no re-login.
 $TokenPath = Join-Path $UserHome '.local\share\copilot-api\github_token'
-
 $tokenOk = (Test-Path $TokenPath) -and ((Get-Item $TokenPath).Length -gt 0)
 if (-not $SkipAuth -and -not $tokenOk) {
     Write-Host ''
     Info 'Running GitHub Copilot device-code auth flow...'
     Info 'When prompted, open the URL in a browser and paste the code.'
     Write-Host ''
-    Push-Location $ProxyDir
-    try {
-        # Force HOME/USERPROFILE so bun (running here as the elevated admin
-        # process) writes the token under the invoking user's home, not the
-        # admin's profile in case of cross-account elevation.
-        $env:USERPROFILE = $UserHome
-        $env:HOME        = $UserHome
-        bun src/main.ts auth
-    } finally { Pop-Location }
-
+    # Force HOME/USERPROFILE in case of cross-account UAC elevation, so the
+    # token lands in the invoking user's home rather than the admin's.
+    $env:USERPROFILE = $UserHome
+    $env:HOME        = $UserHome
+    & $nodeExe $copilotEntry auth
     $tokenOk = (Test-Path $TokenPath) -and ((Get-Item $TokenPath).Length -gt 0)
     if (-not $tokenOk) { Die "Auth did not complete; token still missing at $TokenPath" }
     Ok 'GitHub token captured.'
@@ -230,33 +259,37 @@ if (-not $SkipAuth -and -not $tokenOk) {
     Ok "Auth token already present at $TokenPath"
 }
 
-# ---------- 6. migrate from legacy Scheduled Task (pre-NSSM) ----------
-$legacyName = 'gc2cc-copilot-api'
+# ---------- 6. migrate from older gc2cc installs ----------
+# 6a. Legacy Scheduled Task (pre-NSSM, eb38450..b0f7874)
 foreach ($p in @('\gc2cc\','\')) {
-    $task = Get-ScheduledTask -TaskName $legacyName -TaskPath $p -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName $ServiceName -TaskPath $p -ErrorAction SilentlyContinue
     if ($task) {
-        Info "Removing legacy Scheduled Task '$p$legacyName' (superseded by NSSM service)..."
-        try { Stop-ScheduledTask -TaskName $legacyName -TaskPath $p -ErrorAction SilentlyContinue } catch {}
+        Info "Removing legacy Scheduled Task '$p$ServiceName' ..."
+        try { Stop-ScheduledTask -TaskName $ServiceName -TaskPath $p -ErrorAction SilentlyContinue } catch {}
         try {
-            Unregister-ScheduledTask -TaskName $legacyName -TaskPath $p -Confirm:$false -ErrorAction Stop
+            Unregister-ScheduledTask -TaskName $ServiceName -TaskPath $p -Confirm:$false -ErrorAction Stop
             Ok "legacy task at $p removed"
         } catch {
-            Warn "Could not remove legacy task '$p$legacyName': $_"
+            Warn "Could not remove legacy task '$p$ServiceName': $_"
         }
     }
 }
-# Old per-task wrapper script is unused now.
-$legacyWrapper = Join-Path $InstallDir 'run-proxy.ps1'
-if (Test-Path $legacyWrapper) { Remove-Item $legacyWrapper -Force -ErrorAction SilentlyContinue }
-$legacyVbs = Join-Path $InstallDir 'run-proxy.vbs'
-if (Test-Path $legacyVbs)     { Remove-Item $legacyVbs     -Force -ErrorAction SilentlyContinue }
+# 6b. Legacy bakapiano git-clone tree + old wrapper scripts. Free disk and
+# stop confusing future debugging -- once switched to npm we never go back.
+foreach ($legacy in @(
+    (Join-Path $InstallDir 'copilot-api'),
+    (Join-Path $InstallDir 'run-proxy.ps1'),
+    (Join-Path $InstallDir 'run-proxy.vbs')
+)) {
+    if (Test-Path $legacy) {
+        Info "Removing legacy artifact: $legacy"
+        Remove-Item -Recurse -Force $legacy -ErrorAction SilentlyContinue
+    }
+}
 
 # ---------- 7. NSSM service ----------
-$bunExe = (Get-Command bun -ErrorAction SilentlyContinue).Source
-if (-not $bunExe) { $bunExe = Join-Path $UserHome '.bun\bin\bun.exe' }
-if (-not (Test-Path $bunExe)) { Die "bun.exe not found (tried PATH and $UserHome\.bun\bin\bun.exe)" }
-
-# Stop & remove any prior service (idempotent re-run)
+# Stop & remove any prior gc2cc service (idempotent re-run, including upgrade
+# from the previous bun-based service definition -- args + binary change).
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Info "Stopping and removing existing service '$ServiceName' ..."
     & $nssm stop   $ServiceName confirm | Out-Null
@@ -264,7 +297,7 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Start-Sleep -Milliseconds 500
 }
 
-# Free the port defensively (a stale bun could still be squatting after a crash)
+# Free the port defensively (a stale node/bun could still be squatting).
 $squatters = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 foreach ($c in $squatters) {
     $pp = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
@@ -274,17 +307,21 @@ foreach ($c in $squatters) {
 if ($squatters) { Start-Sleep -Milliseconds 500 }
 
 Info "Registering service '$ServiceName' (port $Port) via NSSM..."
-& $nssm install     $ServiceName $bunExe 'src/main.ts' start --port $Port | Out-Null
-& $nssm set $ServiceName AppDirectory  $ProxyDir | Out-Null
+# Service exec'd: node.exe <copilot-api dist/main.js> start --port <port>
+& $nssm install     $ServiceName $nodeExe $copilotEntry start --port $Port | Out-Null
+& $nssm set $ServiceName AppDirectory  $InstallDir | Out-Null
 & $nssm set $ServiceName DisplayName   'gc2cc Copilot API proxy' | Out-Null
-& $nssm set $ServiceName Description   'GitHub Copilot -> OpenAI/Anthropic-compatible proxy (bakapiano/copilot-api, feat/1m-suffix)' | Out-Null
+& $nssm set $ServiceName Description   'GitHub Copilot -> OpenAI/Anthropic proxy (caozhiyuan/copilot-api @jeffreycao/copilot-api)' | Out-Null
 & $nssm set $ServiceName Start         SERVICE_AUTO_START | Out-Null
 & $nssm set $ServiceName ObjectName    LocalSystem | Out-Null
 # Service runs as LocalSystem, whose default USERPROFILE points at systemprofile
 # and doesn't see ~/.local/share/copilot-api/github_token. Override env so
 # Node's os.homedir() resolves to the installing user's home.
-& $nssm set $ServiceName AppEnvironmentExtra "USERPROFILE=$UserHome" "HOME=$UserHome" | Out-Null
-# Logs: rotate at 5 MB online (no service restart), keep rotated copies in place.
+& $nssm set $ServiceName AppEnvironmentExtra `
+    "USERPROFILE=$UserHome" `
+    "HOME=$UserHome" `
+    "NODE_OPTIONS=--no-warnings" | Out-Null
+# NSSM-native log rotation (5 MB, online, no service restart).
 & $nssm set $ServiceName AppStdout         (Join-Path $LogDir 'copilot-api.log') | Out-Null
 & $nssm set $ServiceName AppStderr         (Join-Path $LogDir 'copilot-api.log') | Out-Null
 & $nssm set $ServiceName AppRotateFiles    1 | Out-Null
@@ -312,10 +349,9 @@ if (-not $ready) {
 Ok "Service running: http://localhost:$Port"
 
 # ---------- 8. Claude Code CLI ----------
-# We're elevated here, so a `npm install -g` would install into the admin's
-# %AppData%\npm rather than the invoking user's. Detect cross-account
-# elevation by comparing the elevated env to $UserHome, and pin npm's prefix
-# to the user's npm dir so `claude` lands on *their* PATH.
+# We're elevated here, so plain `npm install -g` would land in the admin
+# profile's prefix. Pin npm's prefix to the invoking user's npm dir so
+# `claude` ends up on *their* PATH.
 if (-not $SkipClaudeCode) {
     $npmPrefixUser = Join-Path $UserHome 'AppData\Roaming\npm'
     if ($env:USERPROFILE -ne $UserHome) {
@@ -325,7 +361,13 @@ if (-not $SkipClaudeCode) {
         Ok "claude CLI present: $((Get-Command claude).Source)"
     } else {
         Info "Installing @anthropic-ai/claude-code globally (prefix=$npmPrefixUser)..."
-        & npm --prefix $npmPrefixUser install -g '@anthropic-ai/claude-code' 2>&1 | Out-Null
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & npm --prefix $npmPrefixUser install -g '@anthropic-ai/claude-code' 2>&1 | Out-Null
+        } finally {
+            $ErrorActionPreference = $prev
+        }
         if (-not (Test-Path (Join-Path $npmPrefixUser 'claude.cmd'))) {
             Warn 'npm install reported success but claude.cmd not found. Restart your shell and try `ccp`.'
         } else {
@@ -340,10 +382,6 @@ if (-not $SkipPath) {
     Invoke-WebRequest -Uri "$PagesBaseUrl/ccp.ps1" -OutFile (Join-Path $BinDir 'ccp.ps1') -UseBasicParsing
     Invoke-WebRequest -Uri "$PagesBaseUrl/ccp.cmd" -OutFile (Join-Path $BinDir 'ccp.cmd') -UseBasicParsing
 
-    # Add $BinDir to user PATH (HKCU\Environment of the *invoking* user, not
-    # the admin we elevated to). When elevated to a different account we have
-    # to use the registry SID hive directly; for same-user UAC the standard
-    # [Environment]::SetEnvironmentVariable('Path',...,'User') is correct.
     if ($env:USERPROFILE -eq $UserHome) {
         $userPath = [Environment]::GetEnvironmentVariable('Path','User')
         if ($null -eq $userPath) { $userPath = '' }
@@ -360,8 +398,8 @@ if (-not $SkipPath) {
     }
     if (($env:Path -split ';') -notcontains $BinDir) { $env:Path = "$env:Path;$BinDir" }
 
-    # Migration: strip any legacy gc2cc sentinel block from $PROFILE. A
-    # function defined there would shadow the new PATH-mounted ccp.ps1.
+    # Strip any legacy gc2cc sentinel block from $PROFILE (very old installs
+    # put `ccp` there as a function; the PATH-mounted script supersedes it).
     $profilePath = $PROFILE
     if (Test-Path $profilePath) {
         $existing = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
@@ -384,7 +422,8 @@ Ok 'gc2cc install complete.'
 Write-Host ''
 Write-Host ('  service     : {0}' -f $ServiceName)
 Write-Host ('  proxy URL   : http://localhost:{0}' -f $Port)
-Write-Host ('  proxy repo  : {0}' -f $ProxyDir)
+Write-Host ('  proxy pkg   : {0}' -f $NpmPackage)
+Write-Host ('  proxy entry : {0}' -f $copilotEntry)
 Write-Host ('  logs        : {0}' -f $LogDir)
 Write-Host ''
 Write-Host '  ccp is now on PATH for new shells (PS5.1, PS7, cmd, VSCode terminal).'
