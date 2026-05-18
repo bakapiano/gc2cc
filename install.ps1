@@ -25,8 +25,11 @@ param(
     [string] $RepoUrl      = 'https://github.com/bakapiano/copilot-api',
     [string] $RepoBranch   = 'feat/1m-suffix',
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
-    [string] $NssmZipUrl   = 'https://nssm.cc/release/nssm-2.24.zip',
-    [string] $NssmChocoUrl = 'https://community.chocolatey.org/api/v2/package/NSSM/2.24.101.20180116',
+    # Primary: vendored zip on our own GitHub Release (byte-identical mirror
+    # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
+    # upstream URL itself, in case we ever lose the release.
+    [string] $NssmZipUrl   = 'https://github.com/bakapiano/gc2cc/releases/download/nssm-2.24/nssm-2.24.zip',
+    [string] $NssmUpstreamUrl = 'https://nssm.cc/release/nssm-2.24.zip',
     [string] $UserHome     = $env:USERPROFILE,
     [switch] $SkipAuth,
     [switch] $SkipClaudeCode,
@@ -97,7 +100,7 @@ if (-not $isAdmin) {
                  '-RepoBranch',$RepoBranch,
                  '-PagesBaseUrl',$PagesBaseUrl,
                  '-NssmZipUrl',$NssmZipUrl,
-                 '-NssmChocoUrl',$NssmChocoUrl,
+                 '-NssmUpstreamUrl',$NssmUpstreamUrl,
                  '-UserHome',"`"$UserHome`"")
     if ($SkipAuth)       { $argList += '-SkipAuth' }
     if ($SkipClaudeCode) { $argList += '-SkipClaudeCode' }
@@ -142,12 +145,12 @@ Ensure-Cmd 'node'   { winget install --id OpenJS.NodeJS -e --silent --accept-pac
 Ensure-Cmd 'bun'    { winget install --id Oven-sh.Bun   -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
 
 # ---------- 3. nssm ----------
-# nssm.cc is the official source but flaps with 503s. Fall back to the
-# chocolatey CDN nupkg (same NSSM 2.24 build, far more reliable host).
+# Our GitHub Release hosts a vendored copy of nssm-2.24.zip; upstream nssm.cc
+# is the fallback because it 503s often.
 $nssm = Join-Path $BinDir 'nssm.exe'
 if (-not (Test-Path $nssm)) {
     $arch = if ([Environment]::Is64BitOperatingSystem) { 'win64' } else { 'win32' }
-    $sources = @($NssmZipUrl, $NssmChocoUrl)
+    $sources = @($NssmZipUrl, $NssmUpstreamUrl)
     $downloaded = $false
     foreach ($url in $sources) {
         for ($attempt = 1; $attempt -le 3; $attempt++) {
