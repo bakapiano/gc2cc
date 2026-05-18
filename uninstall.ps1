@@ -11,6 +11,7 @@
 #>
 [CmdletBinding()]
 param(
+    [int]    $Port           = 4141,
     [string] $TaskName       = 'gc2cc-copilot-api',
     [string] $TaskPath       = '\gc2cc\',
     [string] $InstallDir     = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
@@ -48,6 +49,16 @@ if (Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyCon
     }
 }
 if (-not $removedAny) { Warn "no task '$TaskName' found at $TaskPath or \, skipping" }
+
+# Unregister doesn't always kill bun (parent pwsh exits first, bun orphans).
+# Free port + sweep any remaining bun before Remove-Item, otherwise the
+# copilot-api dir hits "file in use" while bun still holds a handle.
+$squatters = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+foreach ($c in $squatters) {
+    Info "Freeing port ${Port}: killing PID=$($c.OwningProcess)"
+    Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+}
+if ($squatters) { Start-Sleep -Milliseconds 500 }
 
 $BinDir = Join-Path $InstallDir 'bin'
 
