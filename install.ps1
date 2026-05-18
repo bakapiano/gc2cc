@@ -37,7 +37,14 @@ $ErrorActionPreference = 'Stop'
 function Info ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Cyan }
 function Ok   ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Yellow }
-function Die  ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Red; exit 1 }
+function Die  ($m) {
+    # Use throw, not `exit 1`. When this script is run via `irm | iex` the script
+    # body executes in the host shell's scope, so `exit` closes the user's whole
+    # PowerShell window and the red error flashes by unseen. `throw` raises a
+    # terminating error that iex propagates to the caller; the shell survives.
+    Write-Host "[gc2cc] $m" -ForegroundColor Red
+    throw "[gc2cc] $m"
+}
 
 function Refresh-Path {
     $m = [Environment]::GetEnvironmentVariable('Path','Machine')
@@ -47,6 +54,11 @@ function Refresh-Path {
 
 function Ensure-Cmd {
     param([string]$Name, [scriptblock]$Install)
+    if (Get-Command $Name -ErrorAction SilentlyContinue) { return }
+    # The current shell's $env:Path is a snapshot from when it was launched.
+    # If the cmd was installed after this shell opened, refresh first before
+    # assuming it's actually missing.
+    Refresh-Path
     if (Get-Command $Name -ErrorAction SilentlyContinue) { return }
     Info "Installing prerequisite: $Name"
     & $Install
