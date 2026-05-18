@@ -7,7 +7,7 @@ $base = 'http://localhost:4141'
 try {
     Invoke-WebRequest "$base/v1/models" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null
 } catch {
-    Write-Error "[ccp] copilot-api not reachable at $base. Check: Get-ScheduledTask -TaskName gc2cc-copilot-api -TaskPath \gc2cc\"
+    Write-Error "[ccp] copilot-api not reachable at $base. Check: Get-Service gc2cc-copilot-api"
     return
 }
 
