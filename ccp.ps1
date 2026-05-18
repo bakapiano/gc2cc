@@ -43,21 +43,40 @@ $drop = @(
 $dropOwners = @('Experimental','Fireworks')
 
 $stripSuffix = '(?:\[1m\]|-1m(?:-internal)?|-(high|xhigh))$'
+$is1m        = '(?:\[1m\]|-1m(?:-internal)?)'
 
-$models = ($raw | ConvertFrom-Json).data | ForEach-Object {
+# First pass: filter, then canonicalize ids to their base (stripping
+# [1m]/-1m/-1m-internal/-high/-xhigh) so the same upstream model isn't
+# listed multiple times under server-side reasoning-effort or 1M variants.
+$entries = ($raw | ConvertFrom-Json).data | ForEach-Object {
     if ($dropOwners -contains $_.owned_by) { return }
     foreach ($p in $drop) { if ($_.id -match $p) { return } }
-    # Strip suffixes iteratively: caozhiyuan/copilot-api's /v1/models adds a
-    # `[1m]` marker on top of any model whose upstream id already ends in
-    # `-1m` or `-1m-internal`, so we need two passes to canonicalize ids
-    # like `claude-opus-4.6-1m[1m]` -> `claude-opus-4.6`.
+    # caozhiyuan/copilot-api's /v1/models adds a `[1m]` marker on top of any
+    # model whose upstream id already ends in `-1m`/`-1m-internal`, so we need
+    # multiple passes to canonicalize ids like `claude-opus-4.6-1m[1m]`.
     $clean = $_.id
     while ($clean -match $stripSuffix) { $clean = $clean -replace $stripSuffix, '' }
     [pscustomobject]@{
         id    = $clean
         owner = $_.owned_by
+        is1m  = ($_.id -match $is1m)
     }
-} | Sort-Object id -Unique
+} | Sort-Object id, is1m -Unique
+
+# Second pass: for any base id that has a 1M-capable upstream variant,
+# add a separate `base[1m]` menu entry. We deliberately do NOT drop the
+# base entry -- per caozhiyuan's warning, the bare id is the safer default;
+# the [1m] variant is exposed for users who explicitly want 1M context.
+$baseModels = $entries | Group-Object id | ForEach-Object { $_.Group[0] }
+$has1m = @{}
+foreach ($e in $entries) { if ($e.is1m) { $has1m[$e.id] = $true } }
+$models = @()
+foreach ($m in $baseModels) {
+    $models += [pscustomobject]@{ id = $m.id; owner = $m.owner }
+    if ($has1m.ContainsKey($m.id)) {
+        $models += [pscustomobject]@{ id = "$($m.id)[1m]"; owner = $m.owner }
+    }
+}
 
 if (-not $models -or $models.Count -eq 0) {
     Write-Warning '[ccp] no models matched after filtering. Falling back to free-form prompt.'
