@@ -21,6 +21,7 @@
 param(
     [int]    $Port         = 4141,
     [string] $TaskName     = 'gc2cc-copilot-api',
+    [string] $TaskPath     = '\gc2cc\',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [string] $RepoUrl      = 'https://github.com/bakapiano/copilot-api',
     [string] $RepoBranch   = 'feat/1m-suffix',
@@ -125,11 +126,28 @@ Invoke-WebRequest -Uri "$PagesBaseUrl/run-proxy.ps1" -OutFile $WrapperPs1 -UseBa
 # Use the PowerShell that's currently running this script
 $pwshPath = (Get-Process -Id $PID).Path
 
-# Idempotent: unregister existing task
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+# Idempotent: unregister existing task in our subfolder. (Tasks at root path `\`
+# require admin to modify, so we deliberately scope under \gc2cc\.)
+if (Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue) {
+    try { Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop } catch {}
+    Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false
     Start-Sleep -Milliseconds 300
+}
+
+# Best-effort cleanup of legacy root-path task from older installs. This step
+# requires admin to delete; if it fails, the orphan is inert (its run-proxy.ps1
+# may have been removed) but the user should remove it manually with:
+#   schtasks /Delete /TN gc2cc-copilot-api /F   (run as Administrator)
+$legacy = Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
+if ($legacy) {
+    try {
+        Stop-ScheduledTask  -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+        Info 'Removed legacy root-path task.'
+    } catch {
+        Warn "Legacy root-path task '\\$TaskName' could not be removed (admin required)."
+        Warn "  Run once as admin:  schtasks /Delete /TN $TaskName /F"
+    }
 }
 
 # Stop-ScheduledTask doesn't always reach descendants -- e.g. if a previous run
@@ -165,6 +183,7 @@ $settings = New-ScheduledTaskSettingsSet `
 
 Register-ScheduledTask `
     -TaskName    $TaskName `
+    -TaskPath    $TaskPath `
     -Description 'gc2cc copilot-api proxy (bakapiano fork, feat/1m-suffix)' `
     -Action      $action `
     -Trigger     $trigger `
@@ -172,7 +191,7 @@ Register-ScheduledTask `
     -Settings    $settings `
     -Force | Out-Null
 
-Start-ScheduledTask -TaskName $TaskName
+Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
 
 # Wait for /v1/models
 $ready = $false
@@ -257,6 +276,6 @@ Write-Host '  Open a fresh PowerShell window, then try:'
 Write-Host '    ccp          # pick a Copilot-backed model, then claude'
 Write-Host ''
 Write-Host '  Task controls:'
-Write-Host ('    Get-ScheduledTask -TaskName {0} | Get-ScheduledTaskInfo' -f $TaskName)
-Write-Host ('    Stop-ScheduledTask -TaskName {0}; Start-ScheduledTask -TaskName {0}' -f $TaskName)
+Write-Host ('    Get-ScheduledTask -TaskName {0} -TaskPath {1} | Get-ScheduledTaskInfo' -f $TaskName, $TaskPath)
+Write-Host ('    Stop-ScheduledTask -TaskName {0} -TaskPath {1}; Start-ScheduledTask -TaskName {0} -TaskPath {1}' -f $TaskName, $TaskPath)
 Write-Host ''

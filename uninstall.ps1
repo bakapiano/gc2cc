@@ -11,6 +11,7 @@
 [CmdletBinding()]
 param(
     [string] $TaskName       = 'gc2cc-copilot-api',
+    [string] $TaskPath       = '\gc2cc\',
     [string] $InstallDir     = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [switch] $KeepInstallDir,
     [switch] $KeepClaudeCode,
@@ -23,14 +24,29 @@ function Info ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Cyan }
 function Ok   ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Yellow }
 
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Info "Unregistering Scheduled Task '$TaskName'..."
-    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+$removedAny = $false
+# Current install: \gc2cc\<TaskName>
+if (Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue) {
+    Info "Unregistering Scheduled Task '$TaskPath$TaskName'..."
+    try { Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop } catch {}
+    Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false
     Ok 'task unregistered'
-} else {
-    Warn "task '$TaskName' not found, skipping"
+    $removedAny = $true
 }
+# Legacy root-path orphan from older installs (needs admin to delete)
+if (Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue) {
+    Info "Found legacy root-path task '\$TaskName' from older install. Trying to remove..."
+    try {
+        Stop-ScheduledTask  -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+        Ok 'legacy task removed'
+        $removedAny = $true
+    } catch {
+        Warn "Could not remove legacy task '\$TaskName' (admin required)."
+        Warn "  Run once as admin:  schtasks /Delete /TN $TaskName /F"
+    }
+}
+if (-not $removedAny) { Warn "no task '$TaskName' found at $TaskPath or \, skipping" }
 
 if (-not $KeepInstallDir -and (Test-Path $InstallDir)) {
     Info "Removing $InstallDir ..."

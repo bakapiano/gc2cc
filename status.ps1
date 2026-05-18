@@ -13,6 +13,7 @@ param(
     [ValidateSet('show','restart','logs','tail')]
     [string] $Action      = 'show',
     [string] $TaskName    = 'gc2cc-copilot-api',
+    [string] $TaskPath    = '\gc2cc\',
     [string] $InstallDir  = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [int]    $Port        = 4141,
     [int]    $Lines       = 50
@@ -24,7 +25,7 @@ $Prev   = Join-Path $LogDir 'copilot-api.prev.log'
 
 switch ($Action) {
     'show' {
-        $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $t = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
         if (-not $t) { Write-Host "[gc2cc] task '$TaskName' not installed" -ForegroundColor Red; return }
         $info = $t | Get-ScheduledTaskInfo
         $t    | Select-Object TaskName, State | Format-List
@@ -43,10 +44,10 @@ switch ($Action) {
         }
     }
     'restart' {
-        try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
+        try { Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop } catch {}
         Start-Sleep -Seconds 1
-        Start-ScheduledTask -TaskName $TaskName
-        Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State
+        Start-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath
+        Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath | Select-Object TaskName, State
     }
     'logs' {
         if (Test-Path $Log)  { Write-Host "=== $Log ===" -ForegroundColor Cyan; Get-Content $Log -Tail $Lines }
