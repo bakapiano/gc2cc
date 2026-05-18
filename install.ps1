@@ -7,18 +7,20 @@
     - Installs prereqs (git, node, bun) via winget if missing.
     - Clones bakapiano/copilot-api at branch feat/1m-suffix into %LOCALAPPDATA%\gc2cc\copilot-api.
     - Runs `bun install` and the interactive GitHub Copilot device-code auth flow (once).
-    - Registers an always-on Windows service "gc2cc-copilot-api" via NSSM on port 4141.
+    - Registers a per-user Scheduled Task `gc2cc-copilot-api` that runs the proxy
+      hidden in the background on AtLogOn (auto-restart on failure). No admin needed.
     - Installs @anthropic-ai/claude-code globally.
     - Adds the `ccp` PowerShell function to your $PROFILE (idempotent, sentinel-marked).
 
 .NOTES
-    Must be run as Administrator (NSSM service registration).
-    Re-runs are idempotent: latest fork pulled, service re-created, profile block replaced.
+    Runs without Administrator. The proxy runs as the installing user, so
+    ~/.local/share/copilot-api/github_token resolves naturally.
+    Re-runs are idempotent.
 #>
 [CmdletBinding()]
 param(
     [int]    $Port         = 4141,
-    [string] $ServiceName  = 'gc2cc-copilot-api',
+    [string] $TaskName     = 'gc2cc-copilot-api',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [string] $RepoUrl      = 'https://github.com/bakapiano/copilot-api',
     [string] $RepoBranch   = 'feat/1m-suffix',
@@ -37,11 +39,6 @@ function Ok   ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Yellow }
 function Die  ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Red; exit 1 }
 
-function Test-Admin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    [Security.Principal.WindowsPrincipal]::new($id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
 function Refresh-Path {
     $m = [Environment]::GetEnvironmentVariable('Path','Machine')
     $u = [Environment]::GetEnvironmentVariable('Path','User')
@@ -55,50 +52,23 @@ function Ensure-Cmd {
     & $Install
     Refresh-Path
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        Die "$Name still not on PATH after install. Open a fresh PowerShell as Administrator and re-run."
+        Die "$Name still not on PATH after install. Open a fresh PowerShell and re-run."
     }
 }
 
-# ---------- 0. preflight ----------
-if (-not (Test-Admin)) {
-    Write-Host ''
-    Write-Host '  gc2cc installer needs Administrator (NSSM service registration).' -ForegroundColor Red
-    Write-Host '  Right-click PowerShell -> Run as Administrator, then paste the same one-liner:' -ForegroundColor Yellow
-    Write-Host "    irm $PagesBaseUrl/install.ps1 | iex" -ForegroundColor Cyan
-    Write-Host ''
-    exit 1
-}
+# ---------- 1. layout ----------
+$ProxyDir   = Join-Path $InstallDir 'copilot-api'
+$LogDir     = Join-Path $InstallDir 'logs'
+$WrapperPs1 = Join-Path $InstallDir 'run-proxy.ps1'
 
-$BinDir   = Join-Path $InstallDir 'bin'
-$ProxyDir = Join-Path $InstallDir 'copilot-api'
-$LogDir   = Join-Path $InstallDir 'logs'
-$NssmPath = Join-Path $BinDir 'nssm.exe'
-
-New-Item -ItemType Directory -Force -Path $InstallDir, $BinDir, $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $InstallDir, $LogDir | Out-Null
 Info "Install root: $InstallDir"
 
-# ---------- 1. prereqs ----------
+# ---------- 2. prereqs ----------
 Ensure-Cmd 'winget' { Die 'winget not found. Install "App Installer" from Microsoft Store, then retry.' }
 Ensure-Cmd 'git'    { winget install --id Git.Git       -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
 Ensure-Cmd 'node'   { winget install --id OpenJS.NodeJS -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
 Ensure-Cmd 'bun'    { winget install --id Oven-sh.Bun   -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
-
-# ---------- 2. NSSM ----------
-if (-not (Test-Path $NssmPath)) {
-    Info 'Downloading NSSM 2.24...'
-    $zip = Join-Path $env:TEMP "nssm-$(Get-Random).zip"
-    Invoke-WebRequest -Uri 'https://nssm.cc/release/nssm-2.24.zip' -OutFile $zip -UseBasicParsing
-    $extract = Join-Path $env:TEMP "nssm-extract-$(Get-Random)"
-    Expand-Archive -Path $zip -DestinationPath $extract -Force
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'win64' } else { 'win32' }
-    $src  = Get-ChildItem -Path $extract -Recurse -Filter 'nssm.exe' | Where-Object { $_.FullName -match "\\$arch\\" } | Select-Object -First 1
-    if (-not $src) { Die 'nssm.exe not found in downloaded archive' }
-    Copy-Item -Path $src.FullName -Destination $NssmPath -Force
-    Remove-Item $zip, $extract -Recurse -Force -ErrorAction SilentlyContinue
-    Ok "NSSM at $NssmPath"
-} else {
-    Ok 'NSSM already present'
-}
 
 # ---------- 3. clone or update proxy ----------
 if (Test-Path (Join-Path $ProxyDir '.git')) {
@@ -134,34 +104,54 @@ if (-not $SkipAuth -and -not $tokenOk) {
     Ok "Auth token already present at $TokenPath"
 }
 
-# ---------- 5. NSSM service ----------
-$BunExe = (Get-Command bun).Source
-Info "Registering Windows service '$ServiceName' (port $Port)..."
+# ---------- 5. Scheduled Task ----------
+Info "Registering Scheduled Task '$TaskName' (port $Port, AtLogOn, auto-restart)..."
 
-if (Get-Service $ServiceName -ErrorAction SilentlyContinue) {
-    & $NssmPath stop   $ServiceName 2>&1 | Out-Null
-    & $NssmPath remove $ServiceName confirm 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 500
+# Fetch the wrapper script that the task executes
+Invoke-WebRequest -Uri "$PagesBaseUrl/run-proxy.ps1" -OutFile $WrapperPs1 -UseBasicParsing
+
+# Use the PowerShell that's currently running this script
+$pwshPath = (Get-Process -Id $PID).Path
+
+# Idempotent: unregister existing task
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    Start-Sleep -Milliseconds 300
 }
 
-& $NssmPath install $ServiceName $BunExe 2>&1 | Out-Null
-& $NssmPath set $ServiceName AppParameters       "src/main.ts start --port $Port" 2>&1 | Out-Null
-& $NssmPath set $ServiceName AppDirectory        $ProxyDir 2>&1 | Out-Null
-& $NssmPath set $ServiceName AppStdout           (Join-Path $LogDir 'copilot-api.out.log') 2>&1 | Out-Null
-& $NssmPath set $ServiceName AppStderr           (Join-Path $LogDir 'copilot-api.err.log') 2>&1 | Out-Null
-& $NssmPath set $ServiceName AppRotateFiles      1 2>&1 | Out-Null
-& $NssmPath set $ServiceName AppRotateBytes      5242880 2>&1 | Out-Null
-& $NssmPath set $ServiceName Start               SERVICE_AUTO_START 2>&1 | Out-Null
-& $NssmPath set $ServiceName DisplayName         'gc2cc copilot-api proxy' 2>&1 | Out-Null
-& $NssmPath set $ServiceName Description         'OpenAI/Anthropic-compatible proxy in front of GitHub Copilot (bakapiano fork, feat/1m-suffix).' 2>&1 | Out-Null
+$action = New-ScheduledTaskAction `
+    -Execute $pwshPath `
+    -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Port {1}' -f $WrapperPs1, $Port) `
+    -WorkingDirectory $InstallDir
 
-# Service runs as LocalSystem; point USERPROFILE at the installing user so the proxy
-# finds the GitHub token at ~/.local/share/copilot-api/github_token.
-& $NssmPath set $ServiceName AppEnvironmentExtra "USERPROFILE=$UserHome" "NODE_ENV=production" 2>&1 | Out-Null
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 
-& $NssmPath start $ServiceName 2>&1 | Out-Null
+# Limited run level == standard user, no UAC.
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
-# wait for /v1/models
+$settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -RestartCount 999 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+    -MultipleInstances IgnoreNew `
+    -Hidden
+
+Register-ScheduledTask `
+    -TaskName    $TaskName `
+    -Description 'gc2cc copilot-api proxy (bakapiano fork, feat/1m-suffix)' `
+    -Action      $action `
+    -Trigger     $trigger `
+    -Principal   $principal `
+    -Settings    $settings `
+    -Force | Out-Null
+
+Start-ScheduledTask -TaskName $TaskName
+
+# Wait for /v1/models
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
     try {
@@ -170,11 +160,11 @@ for ($i = 0; $i -lt 60; $i++) {
     } catch { Start-Sleep -Milliseconds 500 }
 }
 if (-not $ready) {
-    Warn "Service did not become reachable on port $Port within 30s. Check logs:"
-    Warn "  $LogDir\copilot-api.err.log"
-    Die  "Service '$ServiceName' is registered but not responding."
+    Warn "Task did not become reachable on port $Port within 30s. Check logs:"
+    Warn "  $LogDir\copilot-api.log"
+    Die  "Task '$TaskName' is registered but not responding."
 }
-Ok "Service running: http://localhost:$Port"
+Ok "Task running: http://localhost:$Port"
 
 # ---------- 6. Claude Code CLI ----------
 if (-not $SkipClaudeCode) {
@@ -185,7 +175,7 @@ if (-not $SkipClaudeCode) {
         npm install -g '@anthropic-ai/claude-code' 2>&1 | Out-Null
         Refresh-Path
         if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-            Warn 'npm install reported success but `claude` not on PATH. Restart your shell and try `cc`.'
+            Warn 'npm install reported success but `claude` not on PATH. Restart your shell and try `ccp`.'
         } else {
             Ok "claude installed: $((Get-Command claude).Source)"
         }
@@ -231,7 +221,7 @@ if (-not $SkipProfile) {
 Write-Host ''
 Ok 'gc2cc install complete.'
 Write-Host ''
-Write-Host ('  service     : {0}' -f $ServiceName)
+Write-Host ('  task        : {0}' -f $TaskName)
 Write-Host ('  proxy URL   : http://localhost:{0}' -f $Port)
 Write-Host ('  proxy repo  : {0}' -f $ProxyDir)
 Write-Host ('  logs        : {0}' -f $LogDir)
@@ -239,7 +229,7 @@ Write-Host ''
 Write-Host '  Open a fresh PowerShell window, then try:'
 Write-Host '    ccp          # pick a Copilot-backed model, then claude'
 Write-Host ''
-Write-Host '  Service controls (Administrator PowerShell):'
-Write-Host ('    Get-Service {0}' -f $ServiceName)
-Write-Host ('    Restart-Service {0}' -f $ServiceName)
+Write-Host '  Task controls:'
+Write-Host ('    Get-ScheduledTask -TaskName {0} | Get-ScheduledTaskInfo' -f $TaskName)
+Write-Host ('    Stop-ScheduledTask -TaskName {0}; Start-ScheduledTask -TaskName {0}' -f $TaskName)
 Write-Host ''

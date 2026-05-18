@@ -1,12 +1,12 @@
 # ccp -- claude YOLO mode routed through copilot-api on http://localhost:4141.
-# Assumes the 'gc2cc-copilot-api' Windows service is up (installed by gc2cc/install.ps1).
+# Assumes the 'gc2cc-copilot-api' Scheduled Task is running (installed by gc2cc/install.ps1).
 function ccp {
     $base = 'http://localhost:4141'
 
     try {
         Invoke-WebRequest "$base/v1/models" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null
     } catch {
-        Write-Error "[ccp] copilot-api not reachable at $base. Check: Get-Service gc2cc-copilot-api"
+        Write-Error "[ccp] copilot-api not reachable at $base. Check: Get-ScheduledTask -TaskName gc2cc-copilot-api"
         return
     }
 

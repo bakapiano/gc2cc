@@ -4,29 +4,31 @@
     Quick status / log helper for gc2cc.
 
 .EXAMPLE
-    irm https://bakapiano.github.io/gc2cc/status.ps1 | iex            # show
-    .\status.ps1 -Action restart                                       # restart service
-    .\status.ps1 -Action tail                                          # follow logs
+    irm https://bakapiano.github.io/gc2cc/status.ps1 | iex    # show
+    .\status.ps1 -Action restart                              # restart task
+    .\status.ps1 -Action tail                                 # follow logs
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('show','restart','logs','tail')]
     [string] $Action      = 'show',
-    [string] $ServiceName = 'gc2cc-copilot-api',
+    [string] $TaskName    = 'gc2cc-copilot-api',
     [string] $InstallDir  = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [int]    $Port        = 4141,
     [int]    $Lines       = 50
 )
 
 $LogDir = Join-Path $InstallDir 'logs'
-$Out    = Join-Path $LogDir 'copilot-api.out.log'
-$Err    = Join-Path $LogDir 'copilot-api.err.log'
+$Log    = Join-Path $LogDir 'copilot-api.log'
+$Prev   = Join-Path $LogDir 'copilot-api.prev.log'
 
 switch ($Action) {
     'show' {
-        $svc = Get-Service $ServiceName -ErrorAction SilentlyContinue
-        if (-not $svc) { Write-Host "[gc2cc] service '$ServiceName' not installed" -ForegroundColor Red; return }
-        $svc | Format-List Name, Status, StartType
+        $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $t) { Write-Host "[gc2cc] task '$TaskName' not installed" -ForegroundColor Red; return }
+        $info = $t | Get-ScheduledTaskInfo
+        $t    | Select-Object TaskName, State | Format-List
+        $info | Select-Object LastRunTime, LastTaskResult, NextRunTime, NumberOfMissedRuns | Format-List
 
         try {
             $r = Invoke-WebRequest "http://localhost:$Port/v1/models" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
@@ -41,15 +43,17 @@ switch ($Action) {
         }
     }
     'restart' {
-        Restart-Service $ServiceName
-        Get-Service $ServiceName
+        try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
+        Start-Sleep -Seconds 1
+        Start-ScheduledTask -TaskName $TaskName
+        Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName, State
     }
     'logs' {
-        if (Test-Path $Out) { Write-Host "=== $Out ===" -ForegroundColor Cyan; Get-Content $Out -Tail $Lines }
-        if (Test-Path $Err) { Write-Host "=== $Err ===" -ForegroundColor Cyan; Get-Content $Err -Tail $Lines }
+        if (Test-Path $Log)  { Write-Host "=== $Log ===" -ForegroundColor Cyan; Get-Content $Log -Tail $Lines }
+        if (Test-Path $Prev) { Write-Host "=== $Prev ===" -ForegroundColor Cyan; Get-Content $Prev -Tail $Lines }
     }
     'tail' {
-        if (-not (Test-Path $Err) -and -not (Test-Path $Out)) { Write-Host '[gc2cc] no logs yet' -ForegroundColor Yellow; return }
-        Get-Content @($Err, $Out | Where-Object { Test-Path $_ }) -Wait -Tail $Lines
+        if (-not (Test-Path $Log)) { Write-Host '[gc2cc] no log yet' -ForegroundColor Yellow; return }
+        Get-Content $Log -Wait -Tail $Lines
     }
 }

@@ -1,16 +1,16 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Uninstall gc2cc: stop and remove the NSSM service, delete %LOCALAPPDATA%\gc2cc,
+    Uninstall gc2cc: stop and unregister the Scheduled Task, delete %LOCALAPPDATA%\gc2cc,
     optionally uninstall @anthropic-ai/claude-code, strip ccp from $PROFILE.
 
 .NOTES
-    Must be run as Administrator. Does not delete the GitHub Copilot auth token at
+    Does NOT require Administrator. Does not delete the GitHub Copilot auth token at
     ~/.local/share/copilot-api/github_token -- remove it manually for a full reset.
 #>
 [CmdletBinding()]
 param(
-    [string] $ServiceName    = 'gc2cc-copilot-api',
+    [string] $TaskName       = 'gc2cc-copilot-api',
     [string] $InstallDir     = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [switch] $KeepInstallDir,
     [switch] $KeepClaudeCode,
@@ -23,29 +23,13 @@ function Info ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Cyan }
 function Ok   ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Yellow }
 
-function Test-Admin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    [Security.Principal.WindowsPrincipal]::new($id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-if (-not (Test-Admin)) {
-    Write-Host '  Uninstaller needs Administrator (service removal). Run from elevated PowerShell.' -ForegroundColor Red
-    exit 1
-}
-
-$NssmPath = Join-Path $InstallDir 'bin\nssm.exe'
-
-if (Get-Service $ServiceName -ErrorAction SilentlyContinue) {
-    Info "Removing service '$ServiceName'..."
-    if (Test-Path $NssmPath) {
-        & $NssmPath stop   $ServiceName 2>&1 | Out-Null
-        & $NssmPath remove $ServiceName confirm 2>&1 | Out-Null
-    } else {
-        sc.exe stop   $ServiceName 2>&1 | Out-Null
-        sc.exe delete $ServiceName 2>&1 | Out-Null
-    }
-    Ok 'service removed'
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Info "Unregistering Scheduled Task '$TaskName'..."
+    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    Ok 'task unregistered'
 } else {
-    Warn "service '$ServiceName' not found, skipping"
+    Warn "task '$TaskName' not found, skipping"
 }
 
 if (-not $KeepInstallDir -and (Test-Path $InstallDir)) {
