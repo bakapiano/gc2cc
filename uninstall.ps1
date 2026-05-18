@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
     Uninstall gc2cc: stop and remove the NSSM service, delete %LOCALAPPDATA%\gc2cc,
-    optionally uninstall @anthropic-ai/claude-code, strip cc/ccp from $PROFILE.
+    optionally uninstall @anthropic-ai/claude-code, strip ccp from $PROFILE.
 
 .NOTES
     Must be run as Administrator. Does not delete the GitHub Copilot auth token at
@@ -68,8 +68,8 @@ if (-not $KeepProfile) {
     $profilePath = $PROFILE
     if (Test-Path $profilePath) {
         $c = Get-Content $profilePath -Raw
-        $begin = '# >>> gc2cc cc/ccp BEGIN -- managed by gc2cc installer'
-        $end   = '# <<< gc2cc cc/ccp END'
+        $begin = '# >>> gc2cc ccp BEGIN -- managed by gc2cc installer'
+        $end   = '# <<< gc2cc ccp END'
         $pattern = [Regex]::Escape($begin) + '[\s\S]*?' + [Regex]::Escape($end) + '\r?\n?'
         $new = [Regex]::Replace($c, $pattern, '').TrimEnd()
         if ($new -ne $c.TrimEnd()) {

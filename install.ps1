@@ -9,7 +9,7 @@
     - Runs `bun install` and the interactive GitHub Copilot device-code auth flow (once).
     - Registers an always-on Windows service "gc2cc-copilot-api" via NSSM on port 4141.
     - Installs @anthropic-ai/claude-code globally.
-    - Adds `cc` and `ccp` PowerShell functions to your $PROFILE (idempotent, sentinel-marked).
+    - Adds the `ccp` PowerShell function to your $PROFILE (idempotent, sentinel-marked).
 
 .NOTES
     Must be run as Administrator (NSSM service registration).
@@ -192,9 +192,9 @@ if (-not $SkipClaudeCode) {
     }
 }
 
-# ---------- 7. PowerShell profile (cc / ccp) ----------
+# ---------- 7. PowerShell profile (ccp) ----------
 if (-not $SkipProfile) {
-    Info "Installing cc / ccp into $PROFILE ..."
+    Info "Installing ccp into $PROFILE ..."
     $snippetUrl = "$PagesBaseUrl/profile-snippet.ps1"
     try {
         $snippet = (Invoke-WebRequest -Uri $snippetUrl -UseBasicParsing).Content
@@ -210,14 +210,14 @@ if (-not $SkipProfile) {
     $existing = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
     if ($null -eq $existing) { $existing = '' }
 
-    $begin = '# >>> gc2cc cc/ccp BEGIN -- managed by gc2cc installer'
-    $end   = '# <<< gc2cc cc/ccp END'
+    $begin = '# >>> gc2cc ccp BEGIN -- managed by gc2cc installer'
+    $end   = '# <<< gc2cc ccp END'
 
     $pattern  = [Regex]::Escape($begin) + '[\s\S]*?' + [Regex]::Escape($end) + '\r?\n?'
     $stripped = [Regex]::Replace($existing, $pattern, '').TrimEnd()
 
-    if ($stripped -match '(?im)^\s*function\s+(cc|ccp)\b') {
-        Warn 'Detected an existing cc/ccp function in your profile outside the gc2cc block.'
+    if ($stripped -match '(?im)^\s*function\s+ccp\b') {
+        Warn 'Detected an existing ccp function in your profile outside the gc2cc block.'
         Warn 'Leaving it alone -- remove it manually if you want gc2cc to take precedence.'
     }
 
@@ -237,7 +237,6 @@ Write-Host ('  proxy repo  : {0}' -f $ProxyDir)
 Write-Host ('  logs        : {0}' -f $LogDir)
 Write-Host ''
 Write-Host '  Open a fresh PowerShell window, then try:'
-Write-Host '    cc           # claude --dangerously-skip-permissions'
 Write-Host '    ccp          # pick a Copilot-backed model, then claude'
 Write-Host ''
 Write-Host '  Service controls (Administrator PowerShell):'

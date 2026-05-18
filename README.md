@@ -5,9 +5,7 @@ Run **Claude Code** backed by **GitHub Copilot's models** on Windows, with a one
 What this gives you:
 
 - An always-on Windows service (`gc2cc-copilot-api`) that proxies GitHub Copilot's models to an OpenAI/Anthropic-compatible endpoint on `http://localhost:4141`.
-- Two PowerShell shortcuts:
-  - `cc`  → `claude --dangerously-skip-permissions`
-  - `ccp` → same, but routed through the Copilot proxy with a model picker
+- A `ccp` PowerShell function that picks a model and launches `claude --dangerously-skip-permissions` against the proxy.
 - 1M-context support via the `[1m]` suffix trick — the proxy is the [bakapiano/copilot-api fork at `feat/1m-suffix`](https://github.com/bakapiano/copilot-api/tree/feat/1m-suffix), which strips the suffix before forwarding so Claude Code locally enables 1M-context mode while Copilot sees the bare model id.
 
 ## Install
@@ -26,14 +24,13 @@ The installer will:
 4. Prompt you once for **GitHub Copilot device-code auth** (you'll see a URL and a code — open it in a browser, paste the code, authorize).
 5. Register the Windows service `gc2cc-copilot-api`, set it to auto-start, and start it.
 6. `npm install -g @anthropic-ai/claude-code`.
-7. Append `cc` / `ccp` to your `$PROFILE` between sentinel markers.
+7. Append `ccp` to your `$PROFILE` between sentinel markers.
 
 Open a **fresh** PowerShell window after install so the profile reloads.
 
 ## Usage
 
 ```powershell
-cc                                    # plain Claude Code (your normal Anthropic auth)
 ccp                                   # pick a Copilot-backed model, then Claude Code
 ccp --resume                          # any extra args are forwarded to claude
 ```
@@ -62,7 +59,7 @@ irm https://bakapiano.github.io/gc2cc/status.ps1 -OutFile status.ps1
 
 ## Updating
 
-Re-run the install one-liner. The script is idempotent — it pulls the latest `feat/1m-suffix`, re-`bun install`s, re-registers the service, and replaces the profile block in place.
+Re-run the install one-liner. The script is idempotent — it pulls the latest `feat/1m-suffix`, re-`bun install`s, re-registers the service, and replaces the `ccp` block in your profile in place.
 
 ## Uninstall
 
@@ -70,7 +67,7 @@ Re-run the install one-liner. The script is idempotent — it pulls the latest `
 irm https://bakapiano.github.io/gc2cc/uninstall.ps1 | iex
 ```
 
-Removes the service, the install dir, the global `@anthropic-ai/claude-code` package, and the `cc`/`ccp` block from your profile.
+Removes the service, the install dir, the global `@anthropic-ai/claude-code` package, and the `ccp` block from your profile.
 
 The GitHub Copilot auth token at `~\.local\share\copilot-api\github_token` is **not** removed — delete it manually for a full reset.
 
@@ -93,7 +90,7 @@ Available switches: `-Port`, `-ServiceName`, `-InstallDir`, `-SkipAuth`, `-SkipC
 | `%LOCALAPPDATA%\gc2cc\bin\nssm.exe` | NSSM service wrapper |
 | `%LOCALAPPDATA%\gc2cc\logs\` | proxy stdout/stderr (rotated at 5 MB) |
 | `~\.local\share\copilot-api\github_token` | GitHub Copilot auth (created by `copilot-api auth`) |
-| `$PROFILE` | `cc`/`ccp` functions, between `# >>> gc2cc` / `# <<< gc2cc` sentinels |
+| `$PROFILE` | `ccp` function, between `# >>> gc2cc ccp BEGIN` / `# <<< gc2cc ccp END` sentinels |
 
 The service runs as `LocalSystem` with `USERPROFILE` redirected to the installing user's home directory, so the proxy finds the GitHub token at the right `~/.local/share/copilot-api/github_token`.
 

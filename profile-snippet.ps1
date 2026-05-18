@@ -1,6 +1,3 @@
-# cc -- claude YOLO mode (bypass all permission prompts). Extra args forwarded, e.g. `cc --resume`.
-function cc { & claude @args --dangerously-skip-permissions }
-
 # ccp -- claude YOLO mode routed through copilot-api on http://localhost:4141.
 # Assumes the 'gc2cc-copilot-api' Windows service is up (installed by gc2cc/install.ps1).
 function ccp {
