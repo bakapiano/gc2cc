@@ -80,7 +80,23 @@ New-Item -ItemType Directory -Force -Path $InstallDir, $LogDir, $BinDir | Out-Nu
 Info "Install root: $InstallDir"
 
 # ---------- 2. prereqs ----------
-Ensure-Cmd 'winget' { Die 'winget not found. Install "App Installer" from Microsoft Store, then retry.' }
+# winget ships with Win10 1809+ / Win11 by default. If it's somehow missing,
+# follow Microsoft's documented no-admin recovery: try Add-AppxPackage
+# -RegisterByFamilyName first (App Installer present but unregistered), and
+# fall back to Microsoft.WinGet.Client + Repair-WinGetPackageManager.
+# Docs: https://learn.microsoft.com/en-us/windows/package-manager/winget/
+Ensure-Cmd 'winget' {
+    Info 'winget not detected; trying Add-AppxPackage -RegisterByFamilyName ...'
+    try {
+        Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop
+    } catch {
+        Info 'Register failed; bootstrapping via Microsoft.WinGet.Client (PSGallery, current user scope)...'
+        $ProgressPreference = 'SilentlyContinue'
+        try { Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ErrorAction Stop | Out-Null } catch {}
+        Install-Module -Name Microsoft.WinGet.Client -Force -Scope CurrentUser -Repository PSGallery -AcceptLicense
+        Repair-WinGetPackageManager
+    }
+}
 Ensure-Cmd 'git'    { winget install --id Git.Git       -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
 Ensure-Cmd 'node'   { winget install --id OpenJS.NodeJS -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
 Ensure-Cmd 'bun'    { winget install --id Oven-sh.Bun   -e --silent --accept-package-agreements --accept-source-agreements | Out-Null }
