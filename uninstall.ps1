@@ -1,20 +1,23 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Uninstall gc2cc: stop and unregister the Scheduled Task, delete %LOCALAPPDATA%\gc2cc,
-    remove the bin\ dir from user PATH, optionally uninstall @anthropic-ai/claude-code,
-    strip any legacy ccp block from $PROFILE (older installs put ccp there).
+    Uninstall gc2cc: stop and remove the NSSM Windows Service, delete
+    %LOCALAPPDATA%\gc2cc, remove the bin\ dir from user PATH, optionally
+    uninstall @anthropic-ai/claude-code, strip any legacy ccp block from
+    $PROFILE, and clean up any legacy Scheduled Task from pre-NSSM installs.
 
 .NOTES
-    Does NOT require Administrator. Does not delete the GitHub Copilot auth token at
+    Self-elevates via UAC -- NSSM service removal requires Administrator.
+    Does not delete the GitHub Copilot auth token at
     ~/.local/share/copilot-api/github_token -- remove it manually for a full reset.
 #>
 [CmdletBinding()]
 param(
     [int]    $Port           = 4141,
-    [string] $TaskName       = 'gc2cc-copilot-api',
-    [string] $TaskPath       = '\gc2cc\',
+    [string] $ServiceName    = 'gc2cc-copilot-api',
     [string] $InstallDir     = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
+    [string] $PagesBaseUrl   = 'https://bakapiano.github.io/gc2cc',
+    [string] $UserHome       = $env:USERPROFILE,
     [switch] $KeepInstallDir,
     [switch] $KeepClaudeCode,
     [switch] $KeepProfile
@@ -26,33 +29,73 @@ function Info ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Cyan }
 function Ok   ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Green }
 function Warn ($m) { Write-Host "[gc2cc] $m" -ForegroundColor Yellow }
 
-$removedAny = $false
-# Current install: \gc2cc\<TaskName>
-if (Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue) {
-    Info "Unregistering Scheduled Task '$TaskPath$TaskName'..."
-    try { Stop-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop } catch {}
-    Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false
-    Ok 'task unregistered'
-    $removedAny = $true
+# ---------- self-elevate ----------
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Info 'NSSM service removal requires Administrator. Re-launching via UAC...'
+    $tmp = Join-Path $env:TEMP ('gc2cc-uninstall-{0}.ps1' -f ([Guid]::NewGuid()))
+    # Prefer the on-disk script (testing local edits before publish); fall back
+    # to downloading from Pages when invoked via `irm | iex`.
+    $localPath = $PSCommandPath
+    if (-not $localPath) { $localPath = $MyInvocation.MyCommand.Path }
+    if ($localPath -and (Test-Path $localPath)) {
+        Copy-Item $localPath $tmp -Force
+    } else {
+        Invoke-WebRequest -Uri "$PagesBaseUrl/uninstall.ps1" -OutFile $tmp -UseBasicParsing
+    }
+    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"",
+                 '-Port',$Port,
+                 '-ServiceName',$ServiceName,
+                 '-InstallDir',"`"$InstallDir`"",
+                 '-PagesBaseUrl',$PagesBaseUrl,
+                 '-UserHome',"`"$UserHome`"")
+    if ($KeepInstallDir) { $argList += '-KeepInstallDir' }
+    if ($KeepClaudeCode) { $argList += '-KeepClaudeCode' }
+    if ($KeepProfile)    { $argList += '-KeepProfile' }
+    Start-Process powershell -ArgumentList $argList -Verb RunAs -Wait
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    return
 }
-# Legacy root-path orphan from older installs (needs admin to delete)
-if (Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue) {
-    Info "Found legacy root-path task '\$TaskName' from older install. Trying to remove..."
-    try {
-        Stop-ScheduledTask  -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
-        Ok 'legacy task removed'
-        $removedAny = $true
-    } catch {
-        Warn "Could not remove legacy task '\$TaskName' (admin required)."
-        Warn "  Run once as admin:  schtasks /Delete /TN $TaskName /F"
+
+$BinDir = Join-Path $InstallDir 'bin'
+$nssm   = Join-Path $BinDir 'nssm.exe'
+
+# ---------- NSSM service ----------
+$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($svc) {
+    Info "Stopping and removing service '$ServiceName' ..."
+    if (Test-Path $nssm) {
+        & $nssm stop   $ServiceName confirm | Out-Null
+        & $nssm remove $ServiceName confirm | Out-Null
+    } else {
+        # NSSM gone but service still registered: fall back to sc.exe.
+        sc.exe stop   $ServiceName | Out-Null
+        sc.exe delete $ServiceName | Out-Null
+    }
+    Ok 'service removed'
+} else {
+    Warn "no service '$ServiceName' found, skipping"
+}
+
+# ---------- legacy Scheduled Task cleanup (pre-NSSM installs) ----------
+foreach ($p in @('\gc2cc\','\')) {
+    $task = Get-ScheduledTask -TaskName $ServiceName -TaskPath $p -ErrorAction SilentlyContinue
+    if ($task) {
+        Info "Found legacy Scheduled Task '$p$ServiceName'. Removing..."
+        try { Stop-ScheduledTask -TaskName $ServiceName -TaskPath $p -ErrorAction SilentlyContinue } catch {}
+        try {
+            Unregister-ScheduledTask -TaskName $ServiceName -TaskPath $p -Confirm:$false -ErrorAction Stop
+            Ok "legacy task at $p removed"
+        } catch {
+            Warn "Could not remove legacy task at '$p': $_"
+        }
     }
 }
-if (-not $removedAny) { Warn "no task '$TaskName' found at $TaskPath or \, skipping" }
 
-# Unregister doesn't always kill bun (parent pwsh exits first, bun orphans).
-# Free port + sweep any remaining bun before Remove-Item, otherwise the
-# copilot-api dir hits "file in use" while bun still holds a handle.
+# ---------- port sweep ----------
+# Stop + remove doesn't always kill bun (NSSM kills the tree, but a manual
+# `nssm stop` race + orphan after a crash can leave a stale listener).
 $squatters = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 foreach ($c in $squatters) {
     Info "Freeing port ${Port}: killing PID=$($c.OwningProcess)"
@@ -60,25 +103,30 @@ foreach ($c in $squatters) {
 }
 if ($squatters) { Start-Sleep -Milliseconds 500 }
 
-$BinDir = Join-Path $InstallDir 'bin'
-
-# Remove $BinDir from user PATH (HKCU\Environment -- no admin)
-$userPath = [Environment]::GetEnvironmentVariable('Path','User')
-if ($userPath) {
-    $parts = $userPath -split ';' | Where-Object { $_ -and ($_ -ne $BinDir) }
-    $newPath = $parts -join ';'
-    if ($newPath -ne $userPath) {
-        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Ok "removed from user PATH: $BinDir"
+# ---------- user PATH ----------
+# Remove $BinDir from the invoking user's PATH (HKCU\Environment).
+if ($env:USERPROFILE -eq $UserHome) {
+    $userPath = [Environment]::GetEnvironmentVariable('Path','User')
+    if ($userPath) {
+        $parts = $userPath -split ';' | Where-Object { $_ -and ($_ -ne $BinDir) }
+        $newPath = $parts -join ';'
+        if ($newPath -ne $userPath) {
+            [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+            Ok "removed from user PATH: $BinDir"
+        }
     }
+} else {
+    Warn "Cross-account elevation; PATH not modified for $UserHome (remove $BinDir manually)."
 }
 
+# ---------- install dir ----------
 if (-not $KeepInstallDir -and (Test-Path $InstallDir)) {
     Info "Removing $InstallDir ..."
     Remove-Item -Recurse -Force $InstallDir
     Ok 'install dir removed'
 }
 
+# ---------- claude-code CLI ----------
 if (-not $KeepClaudeCode) {
     if (Get-Command claude -ErrorAction SilentlyContinue) {
         Info 'Uninstalling @anthropic-ai/claude-code ...'
@@ -89,6 +137,7 @@ if (-not $KeepClaudeCode) {
     }
 }
 
+# ---------- $PROFILE cleanup ----------
 if (-not $KeepProfile) {
     $profilePath = $PROFILE
     if (Test-Path $profilePath) {
@@ -100,8 +149,6 @@ if (-not $KeepProfile) {
         if ($new -ne $c.TrimEnd()) {
             Set-Content -Path $profilePath -Value $new -Encoding UTF8
             Ok "profile snippet removed from $profilePath"
-        } else {
-            Warn "no gc2cc block found in $profilePath"
         }
     }
 }
