@@ -2,13 +2,35 @@
 # PATH-mounted standalone script (no profile required). Works the same in PS5.1,
 # PS7, and any host: drop it under %LOCALAPPDATA%\gc2cc\bin\ (added to user PATH
 # by gc2cc/install.ps1), and `ccp ...` resolves from any shell.
-$base = 'http://localhost:4141'
+$base      = 'http://localhost:4141'
+$taskName  = 'gc2cc-copilot-api'
+$taskPath  = '\gc2cc\'
 
-try {
-    Invoke-WebRequest "$base/v1/models" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null
-} catch {
-    Write-Error "[ccp] copilot-api not reachable at $base. Check: Get-ScheduledTask -TaskName gc2cc-copilot-api -TaskPath \gc2cc\"
-    return
+function Test-Proxy {
+    try { Invoke-WebRequest "$base/v1/models" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null; $true } catch { $false }
+}
+
+if (-not (Test-Proxy)) {
+    $t = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+    if (-not $t) {
+        Write-Error "[ccp] task '$taskPath$taskName' not registered. Install: irm https://bakapiano.github.io/gc2cc/install.ps1 | iex"
+        return
+    }
+    Write-Host "[ccp] proxy not reachable on $base; starting task..." -ForegroundColor Yellow
+    try { Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop } catch {
+        Write-Error "[ccp] Start-ScheduledTask failed: $_"
+        return
+    }
+    $ready = $false
+    for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Proxy) { $ready = $true; break }
+    }
+    if (-not $ready) {
+        Write-Error "[ccp] task started but proxy still not up after 30s. Logs: $env:LOCALAPPDATA\gc2cc\logs\copilot-api.log"
+        return
+    }
+    Write-Host "[ccp] proxy ready." -ForegroundColor Green
 }
 
 # [1m] suffix is consumed by Claude Code locally (case-insensitive match to enable 1M-context

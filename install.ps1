@@ -136,13 +136,31 @@ if (-not $SkipAuth -and -not $tokenOk) {
 }
 
 # ---------- 5. Scheduled Task ----------
-Info "Registering Scheduled Task '$TaskName' (port $Port, AtLogOn, auto-restart)..."
+Info "Registering Scheduled Task '$TaskName' (port $Port, AtLogOn)..."
 
-# Fetch the wrapper script that the task executes
+# Fetch the wrapper script that the task ultimately runs
 Invoke-WebRequest -Uri "$PagesBaseUrl/run-proxy.ps1" -OutFile $WrapperPs1 -UseBasicParsing
 
 # Use the PowerShell that's currently running this script
 $pwshPath = (Get-Process -Id $PID).Path
+
+# Task Scheduler launching pwsh directly briefly flashes a conhost window
+# even with -WindowStyle Hidden (console subsystem creates the window before
+# pwsh parses the flag). Wrap in a wscript-launched VBS that spawns hidden
+# pwsh and exits immediately -- wscript is GUI subsystem, no window flash.
+$VbsPath = Join-Path $InstallDir 'run-proxy.vbs'
+$vbsContent = @"
+' gc2cc Scheduled Task launcher. wscript -> hidden pwsh -> run-proxy.ps1.
+' wscript exits immediately, so Task Scheduler sees the task as "completed"
+' instantly. bun crash auto-restart is gone -- ccp picks up that slack by
+' Start-ScheduledTask'ing the task on demand if /v1/models is unreachable.
+Dim shell, dir, cmd
+Set shell = CreateObject("WScript.Shell")
+dir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName)
+cmd = """$pwshPath"" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & dir & "\run-proxy.ps1"" -Port $Port"
+shell.Run cmd, 0, False
+"@
+Set-Content -Path $VbsPath -Value $vbsContent -Encoding ASCII
 
 # Idempotent: unregister existing task in our subfolder. (Tasks at root path `\`
 # require admin to modify, so we deliberately scope under \gc2cc\.)
@@ -180,8 +198,8 @@ foreach ($c in $squatters) {
 if ($squatters) { Start-Sleep -Milliseconds 500 }
 
 $action = New-ScheduledTaskAction `
-    -Execute $pwshPath `
-    -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Port {1}' -f $WrapperPs1, $Port) `
+    -Execute "$env:SystemRoot\System32\wscript.exe" `
+    -Argument ('"{0}"' -f $VbsPath) `
     -WorkingDirectory $InstallDir
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -193,8 +211,6 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -RestartCount 999 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -MultipleInstances IgnoreNew `
     -Hidden
