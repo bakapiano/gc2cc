@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
     Uninstall gc2cc: stop and unregister the Scheduled Task, delete %LOCALAPPDATA%\gc2cc,
-    optionally uninstall @anthropic-ai/claude-code, strip ccp from $PROFILE.
+    remove the bin\ dir from user PATH, optionally uninstall @anthropic-ai/claude-code,
+    strip any legacy ccp block from $PROFILE (older installs put ccp there).
 
 .NOTES
     Does NOT require Administrator. Does not delete the GitHub Copilot auth token at
@@ -47,6 +48,19 @@ if (Get-ScheduledTask -TaskName $TaskName -TaskPath '\' -ErrorAction SilentlyCon
     }
 }
 if (-not $removedAny) { Warn "no task '$TaskName' found at $TaskPath or \, skipping" }
+
+$BinDir = Join-Path $InstallDir 'bin'
+
+# Remove $BinDir from user PATH (HKCU\Environment -- no admin)
+$userPath = [Environment]::GetEnvironmentVariable('Path','User')
+if ($userPath) {
+    $parts = $userPath -split ';' | Where-Object { $_ -and ($_ -ne $BinDir) }
+    $newPath = $parts -join ';'
+    if ($newPath -ne $userPath) {
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Ok "removed from user PATH: $BinDir"
+    }
+}
 
 if (-not $KeepInstallDir -and (Test-Path $InstallDir)) {
     Info "Removing $InstallDir ..."

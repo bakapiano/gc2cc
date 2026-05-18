@@ -10,7 +10,8 @@
     - Registers a per-user Scheduled Task `gc2cc-copilot-api` that runs the proxy
       hidden in the background on AtLogOn (auto-restart on failure). No admin needed.
     - Installs @anthropic-ai/claude-code globally.
-    - Adds the `ccp` PowerShell function to your $PROFILE (idempotent, sentinel-marked).
+    - Drops `ccp.ps1` + `ccp.cmd` into %LOCALAPPDATA%\gc2cc\bin\ and adds that dir
+      to user PATH so `ccp` works from any shell (PS5.1, PS7, VSCode terminal, cmd).
 
 .NOTES
     Runs without Administrator. The proxy runs as the installing user, so
@@ -28,7 +29,7 @@ param(
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
     [switch] $SkipAuth,
     [switch] $SkipClaudeCode,
-    [switch] $SkipProfile
+    [switch] $SkipPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,9 +73,10 @@ function Ensure-Cmd {
 # ---------- 1. layout ----------
 $ProxyDir   = Join-Path $InstallDir 'copilot-api'
 $LogDir     = Join-Path $InstallDir 'logs'
+$BinDir     = Join-Path $InstallDir 'bin'
 $WrapperPs1 = Join-Path $InstallDir 'run-proxy.ps1'
 
-New-Item -ItemType Directory -Force -Path $InstallDir, $LogDir | Out-Null
+New-Item -ItemType Directory -Force -Path $InstallDir, $LogDir, $BinDir | Out-Null
 Info "Install root: $InstallDir"
 
 # ---------- 2. prereqs ----------
@@ -224,43 +226,42 @@ if (-not $SkipClaudeCode) {
     }
 }
 
-# ---------- 7. PowerShell profile (ccp) ----------
-if (-not $SkipProfile) {
-    Info "Installing ccp into $PROFILE ..."
-    $snippetUrl = "$PagesBaseUrl/profile-snippet.ps1"
-    $snippetTmp = Join-Path $env:TEMP "gc2cc-snippet-$(Get-Random).ps1"
-    try {
-        Invoke-WebRequest -Uri $snippetUrl -OutFile $snippetTmp -UseBasicParsing
-        $snippet = Get-Content $snippetTmp -Raw
-    } catch {
-        Die "Could not fetch $snippetUrl : $_"
-    } finally {
-        Remove-Item $snippetTmp -Force -ErrorAction SilentlyContinue
-    }
+# ---------- 7. ccp on PATH ----------
+if (-not $SkipPath) {
+    Info "Deploying ccp.ps1 and ccp.cmd to $BinDir ..."
+    Invoke-WebRequest -Uri "$PagesBaseUrl/ccp.ps1" -OutFile (Join-Path $BinDir 'ccp.ps1') -UseBasicParsing
+    Invoke-WebRequest -Uri "$PagesBaseUrl/ccp.cmd" -OutFile (Join-Path $BinDir 'ccp.cmd') -UseBasicParsing
 
+    # Add $BinDir to user PATH (HKCU\Environment -- no admin), idempotently.
+    $userPath = [Environment]::GetEnvironmentVariable('Path','User')
+    if ($null -eq $userPath) { $userPath = '' }
+    $parts = $userPath -split ';' | Where-Object { $_ }
+    if ($parts -notcontains $BinDir) {
+        $newPath = (($parts + $BinDir) -join ';')
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Ok "Added to user PATH: $BinDir"
+    } else {
+        Ok "user PATH already contains $BinDir"
+    }
+    # Pull into current session too so `ccp` works right now without reopening.
+    if (($env:Path -split ';') -notcontains $BinDir) { $env:Path = "$env:Path;$BinDir" }
+
+    # Migration: strip any legacy gc2cc sentinel block from $PROFILE. A
+    # function defined there would shadow the new PATH-mounted ccp.ps1.
     $profilePath = $PROFILE
-    $profileDir  = Split-Path $profilePath -Parent
-    if (-not (Test-Path $profileDir))  { New-Item -ItemType Directory -Force -Path $profileDir | Out-Null }
-    if (-not (Test-Path $profilePath)) { New-Item -ItemType File      -Force -Path $profilePath | Out-Null }
-
-    $existing = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
-    if ($null -eq $existing) { $existing = '' }
-
-    $begin = '# >>> gc2cc ccp BEGIN -- managed by gc2cc installer'
-    $end   = '# <<< gc2cc ccp END'
-
-    $pattern  = [Regex]::Escape($begin) + '[\s\S]*?' + [Regex]::Escape($end) + '\r?\n?'
-    $stripped = [Regex]::Replace($existing, $pattern, '').TrimEnd()
-
-    if ($stripped -match '(?im)^\s*function\s+ccp\b') {
-        Warn 'Detected an existing ccp function in your profile outside the gc2cc block.'
-        Warn 'Leaving it alone -- remove it manually if you want gc2cc to take precedence.'
+    if (Test-Path $profilePath) {
+        $existing = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+        if ($existing) {
+            $begin   = '# >>> gc2cc ccp BEGIN -- managed by gc2cc installer'
+            $end     = '# <<< gc2cc ccp END'
+            $pattern = [Regex]::Escape($begin) + '[\s\S]*?' + [Regex]::Escape($end) + '\r?\n?'
+            $cleaned = [Regex]::Replace($existing, $pattern, '').TrimEnd()
+            if ($cleaned -ne $existing.TrimEnd()) {
+                Set-Content -Path $profilePath -Value $cleaned -Encoding UTF8
+                Info "Removed legacy gc2cc block from $profilePath (now superseded by PATH)."
+            }
+        }
     }
-
-    $block = $begin + "`r`n" + $snippet.TrimEnd() + "`r`n" + $end + "`r`n"
-    $final = if ($stripped) { $stripped + "`r`n`r`n" + $block } else { $block }
-    Set-Content -Path $profilePath -Value $final -Encoding UTF8
-    Ok "Profile updated: $profilePath"
 }
 
 # ---------- 8. summary ----------
@@ -272,7 +273,8 @@ Write-Host ('  proxy URL   : http://localhost:{0}' -f $Port)
 Write-Host ('  proxy repo  : {0}' -f $ProxyDir)
 Write-Host ('  logs        : {0}' -f $LogDir)
 Write-Host ''
-Write-Host '  Open a fresh PowerShell window, then try:'
+Write-Host '  ccp is now on PATH for new shells (PS5.1, PS7, cmd, VSCode terminal).'
+Write-Host '  Open a fresh window, then try:'
 Write-Host '    ccp          # pick a Copilot-backed model, then claude'
 Write-Host ''
 Write-Host '  Task controls:'
