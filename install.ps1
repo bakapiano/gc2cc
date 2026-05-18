@@ -120,6 +120,17 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Start-Sleep -Milliseconds 300
 }
 
+# Stop-ScheduledTask doesn't always reach descendants -- e.g. if a previous run
+# crashed mid-way the wrapper pwsh can exit and orphan bun, leaving 4141 squatted.
+# Free the port defensively so the new task action can bind.
+$squatters = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+foreach ($c in $squatters) {
+    $pp = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+    Info "Freeing port ${Port}: killing PID=$($c.OwningProcess) name=$($pp.ProcessName)"
+    Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+}
+if ($squatters) { Start-Sleep -Milliseconds 500 }
+
 $action = New-ScheduledTaskAction `
     -Execute $pwshPath `
     -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Port {1}' -f $WrapperPs1, $Port) `
