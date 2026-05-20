@@ -58,6 +58,22 @@ ccp config                            # interactive: pick default model + toggle
 ccp upgrade                           # re-run the gc2cc one-liner installer (UAC will pop)
 ```
 
+### First-run wizard
+
+The very first time you launch `ccp`, if `~/.local/share/gc2cc/ccp.json` doesn't exist, you're walked through the same flow as `ccp config` to set a default model and the bypass-permissions toggle. Hitting Enter for both still creates a placeholder file (defaults preserved) so subsequent launches go straight to the picker.
+
+### Update banner
+
+On each launch ccp compares the SHA-256 of its local `ccp.ps1` to the copy served from Pages. If they diverge it prints:
+
+```
+[ccp] gc2cc has updates available -- run 'ccp upgrade' to refresh
+```
+
+The check is cached in `ccp.json` for 24h, so it adds no per-launch latency in the common case. Network errors are silent — the banner never blocks ccp. After `ccp upgrade` the cache is cleared so the banner disappears immediately.
+
+### Config file
+
 Settings live in `~/.local/share/gc2cc/ccp.json`:
 
 ```json
@@ -69,6 +85,8 @@ Settings live in `~/.local/share/gc2cc/ccp.json`:
 
 - `defaultModel`: skip the picker and use this id on plain `ccp`. Set to `null` (or use `ccp config` → `[0]`) to always prompt.
 - `bypassPermissions`: pass `--dangerously-skip-permissions` to claude. Default `true` (the original YOLO behavior). Flip it off if you want claude to ask for tool-use confirmations.
+
+(Two other keys — `updateCheckAt` and `updateAvailable` — are managed by ccp itself for the update-banner cache. Don't hand-edit them.)
 
 The menu is built fresh from the proxy each time, with these rules:
 
@@ -121,7 +139,11 @@ irm https://bakapiano.github.io/gc2cc/status.ps1 -OutFile status.ps1
 
 ## Updating
 
-Re-run the install one-liner. The installer always runs `npm install -g @jeffreycao/copilot-api@latest`, so a re-run picks up upstream proxy fixes (the project ships near-daily — check `package.json` version in `%LOCALAPPDATA%\gc2cc\npm\global\node_modules\@jeffreycao\copilot-api\`).
+Easiest: `ccp upgrade` — it fetches the latest `install.ps1` from Pages and re-runs it (will trigger UAC). Equivalent to running the one-liner again.
+
+Either path always runs `npm install -g @jeffreycao/copilot-api@latest`, so a re-run picks up upstream proxy fixes (the project ships near-daily — check `package.json` version in `%LOCALAPPDATA%\gc2cc\npm\global\node_modules\@jeffreycao\copilot-api\`).
+
+> **Heads-up:** the upgrade stops the running service, swaps it, and restarts. There's a 1–3s window where `localhost:4141` is unreachable. Don't `ccp upgrade` while a long-running `claude` task is mid-flight.
 
 ## Uninstall
 
@@ -158,6 +180,7 @@ Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-
 | `%LOCALAPPDATA%\gc2cc\logs\copilot-api.log` | proxy stdout/stderr (NSSM rotated at 5 MB) |
 | `%LOCALAPPDATA%\gc2cc\logs\install.log` | install transcript (handy when self-elevation fails) |
 | `~\.local\share\copilot-api\github_token` | GitHub Copilot auth (created by `copilot-api auth`) |
+| `~\.local\share\gc2cc\ccp.json` | ccp settings (default model, bypass-permissions, update-check cache); preserved across `uninstall` |
 | User PATH (HKCU\Environment) | gets `%LOCALAPPDATA%\gc2cc\bin\` appended |
 | HKLM\SYSTEM\...\Services\gc2cc-copilot-api | Windows Service entry |
 
