@@ -1,5 +1,10 @@
 # gc2cc
 
+[![Stars](https://img.shields.io/github/stars/bakapiano/gc2cc?style=flat&logo=github)](https://github.com/bakapiano/gc2cc/stargazers)
+[![Installs](https://img.shields.io/github/downloads/bakapiano/gc2cc/install-counter/gc2cc-install-counter.txt?label=installs&color=blue)](https://github.com/bakapiano/gc2cc/releases/tag/install-counter)
+[![NSSM downloads](https://img.shields.io/github/downloads/bakapiano/gc2cc/nssm-2.24/nssm-2.24.zip?label=nssm.zip%20pulls&color=gray)](https://github.com/bakapiano/gc2cc/releases/tag/nssm-2.24)
+[![Last commit](https://img.shields.io/github/last-commit/bakapiano/gc2cc?label=last%20commit)](https://github.com/bakapiano/gc2cc/commits/main)
+
 Run **Claude Code** backed by **GitHub Copilot's models** on Windows, with a one-line installer.
 
 What this gives you:
@@ -185,6 +190,10 @@ Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-
 | HKLM\SYSTEM\...\Services\gc2cc-copilot-api | Windows Service entry |
 
 The service runs at boot (no user login required), so it survives sign-out, lock screen, sleep, and reboots.
+
+## What we count
+
+The only thing gc2cc tracks is how often `install.ps1` runs. After UAC self-elevation it issues a single `GET` to a 99-byte file on a GitHub Release (tag `install-counter`). GitHub's own download counter is what powers the "installs" badge above. No request body, no version, no user identifier, no IP collected by us. The number you see on the badge is the only data we have. The fetch is best-effort: offline installs still complete normally.
 
 ## Credits
 

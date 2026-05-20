@@ -123,6 +123,15 @@ $installTranscript = Join-Path $LogDir 'install.log'
 try { Start-Transcript -Path $installTranscript -Force -ErrorAction Stop | Out-Null } catch {}
 Info "Install root: $InstallDir (elevated as $env:USERNAME, pinned to $UserHome)"
 
+# Aggregate install counter -- fetched only here in the elevated branch so the
+# UAC parent + elevated child don't double-count. Pure hit counter: the asset's
+# GitHub download count is the metric, no telemetry / no user info collected.
+# Best-effort: any failure is silent so an offline install still proceeds.
+try {
+    Invoke-WebRequest -Uri 'https://github.com/bakapiano/gc2cc/releases/download/install-counter/gc2cc-install-counter.txt' `
+        -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop | Out-Null
+} catch {}
+
 # ---------- 2. prereqs ----------
 # winget ships with Win10 1809+ / Win11 by default. If it's somehow missing,
 # follow Microsoft's documented recovery: try Add-AppxPackage
