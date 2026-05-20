@@ -50,7 +50,25 @@ The service runs as `LocalSystem`, but Copilot's auth token lives under the *inv
 ccp                                   # pick a Copilot-backed model, then Claude Code
 ccp --resume                          # any extra args are forwarded to claude
 ccp -p "say hi"                       # one-shot via claude -p
+ccp -Model gpt-5.5 -p "..."           # skip the picker; -Model accepts -model/-Mode/-mode too
+ccp -- --help                         # `--` forwards the rest to claude (so `ccp --help` stays ccp)
+ccp --help                            # show ccp usage + current settings
+
+ccp config                            # interactive: pick default model + toggle bypass-permissions
+ccp upgrade                           # re-run the gc2cc one-liner installer (UAC will pop)
 ```
+
+Settings live in `~/.local/share/gc2cc/ccp.json`:
+
+```json
+{
+  "defaultModel": "claude-opus-4.7",
+  "bypassPermissions": true
+}
+```
+
+- `defaultModel`: skip the picker and use this id on plain `ccp`. Set to `null` (or use `ccp config` → `[0]`) to always prompt.
+- `bypassPermissions`: pass `--dangerously-skip-permissions` to claude. Default `true` (the original YOLO behavior). Flip it off if you want claude to ask for tool-use confirmations.
 
 The menu is built fresh from the proxy each time, with these rules:
 
