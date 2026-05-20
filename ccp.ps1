@@ -25,7 +25,15 @@ $configPath = Join-Path $HOME '.local\share\gc2cc\ccp.json'
 
 # ---------- config ----------
 function Load-CcpConfig {
-    $defaults = @{ defaultModel = $null; bypassPermissions = $true }
+    # User-facing keys: defaultModel, bypassPermissions
+    # Internal cache keys (managed by Test-UpdateAvailable / Invoke-CcpUpgrade,
+    # not surfaced in `ccp config`): updateCheckAt, updateAvailable
+    $defaults = @{
+        defaultModel      = $null
+        bypassPermissions = $true
+        updateCheckAt     = $null
+        updateAvailable   = $false
+    }
     if (-not (Test-Path $configPath)) { return $defaults }
     try {
         $loaded = Get-Content $configPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -33,7 +41,7 @@ function Load-CcpConfig {
         Write-Warning "[ccp] $configPath is invalid JSON; using defaults"
         return $defaults
     }
-    foreach ($k in 'defaultModel','bypassPermissions') {
+    foreach ($k in 'defaultModel','bypassPermissions','updateCheckAt','updateAvailable') {
         if ($loaded.PSObject.Properties.Name -contains $k) {
             $defaults[$k] = $loaded.$k
         }
@@ -45,6 +53,53 @@ function Save-CcpConfig($cfg) {
     $dir = Split-Path $configPath -Parent
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $cfg | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+}
+
+# ---------- update check (24h-cached) ----------
+# Use .NET's SHA256 directly rather than Get-FileHash -- some Win11 builds
+# ship Microsoft.PowerShell.Utility 3.1.0.0 without the Get-FileHash cmdlet
+# (observed on Win11 26100 in the wild).
+function Get-Sha256Hex([byte[]]$Bytes) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToUpper() }
+    finally { $sha.Dispose() }
+}
+
+function Get-OnlineCcpHash {
+    try {
+        $resp = Invoke-WebRequest "$pagesBase/ccp.ps1" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
+        $bytes = $resp.Content
+        if ($bytes -isnot [byte[]]) { $bytes = [Text.Encoding]::UTF8.GetBytes($bytes) }
+        return Get-Sha256Hex $bytes
+    } catch { return $null }
+}
+
+function Get-LocalCcpHash {
+    if (-not $PSCommandPath -or -not (Test-Path $PSCommandPath)) { return $null }
+    return Get-Sha256Hex ([System.IO.File]::ReadAllBytes($PSCommandPath))
+}
+
+# Returns $true if the online ccp.ps1 has a different hash than the local one.
+# Caches the result in ccp.json for 24h to keep ccp startup snappy. Any network
+# error falls back to "no update" silently -- update check shouldn't block ccp.
+function Test-UpdateAvailable($cfg) {
+    $now = (Get-Date).ToUniversalTime()
+    if ($cfg.updateCheckAt) {
+        try {
+            $lastCheck = [datetime]::Parse($cfg.updateCheckAt).ToUniversalTime()
+            if (($now - $lastCheck).TotalHours -lt 24 -and ($now - $lastCheck).TotalHours -ge 0) {
+                return [bool]$cfg.updateAvailable
+            }
+        } catch {}
+    }
+    $online = Get-OnlineCcpHash
+    if (-not $online) { return [bool]$cfg.updateAvailable }  # network down: keep prior state
+    $local = Get-LocalCcpHash
+    $available = ($local -and ($online -ne $local))
+    $cfg.updateCheckAt   = $now.ToString('o')
+    $cfg.updateAvailable = $available
+    try { Save-CcpConfig $cfg } catch {}  # best-effort; don't fail ccp on disk error
+    return $available
 }
 
 # ---------- proxy + model discovery ----------
@@ -215,6 +270,15 @@ function Invoke-CcpUpgrade {
     $b = (Invoke-WebRequest "$pagesBase/install.ps1" -UseBasicParsing).Content
     if ($b -is [byte[]]) { $b = [Text.Encoding]::UTF8.GetString($b) }
     Invoke-Expression $b
+    # Clear the staleness flag -- we just upgraded, so the local ccp.ps1 now
+    # matches Pages. Without this, the banner would persist until the 24h TTL
+    # naturally expires.
+    try {
+        $cfg = Load-CcpConfig
+        $cfg.updateCheckAt   = (Get-Date).ToUniversalTime().ToString('o')
+        $cfg.updateAvailable = $false
+        Save-CcpConfig $cfg
+    } catch {}
 }
 
 # ---------- model picker ----------
@@ -307,8 +371,27 @@ if (-not (Test-Proxy)) {
     return
 }
 
+# First-run wizard: if no config file exists, walk through `ccp config` once
+# so a placeholder file gets written. Subsequent ccp launches see the file
+# and skip straight to the model picker / default. This works even if the
+# user accepts all defaults -- the file itself is the signal.
+if (-not (Test-Path $configPath)) {
+    Write-Host ''
+    Write-Host "[ccp] No config found at $configPath -- first-run setup." -ForegroundColor Cyan
+    Write-Host "[ccp] You can re-run this any time with 'ccp config'." -ForegroundColor Cyan
+    Invoke-CcpConfig
+    Write-Host ''
+}
+
 $config = Load-CcpConfig
-$main   = $modelOverride
+
+# Show an upgrade banner if the online ccp.ps1 differs from ours. Check is
+# cached for 24h so this adds no per-invocation latency in the common case.
+if (Test-UpdateAvailable $config) {
+    Write-Host "[ccp] gc2cc has updates available -- run 'ccp upgrade' to refresh" -ForegroundColor Yellow
+}
+
+$main = $modelOverride
 if (-not $main) { $main = $config.defaultModel }
 if (-not $main) {
     $main = Invoke-ModelPicker
