@@ -20,6 +20,7 @@ param(
     [string] $UserHome       = $env:USERPROFILE,
     [switch] $KeepInstallDir,
     [switch] $KeepClaudeCode,
+    [switch] $KeepCodex,
     [switch] $KeepProfile
 )
 
@@ -52,6 +53,7 @@ if (-not $isAdmin) {
                  '-UserHome',"`"$UserHome`"")
     if ($KeepInstallDir) { $argList += '-KeepInstallDir' }
     if ($KeepClaudeCode) { $argList += '-KeepClaudeCode' }
+    if ($KeepCodex)      { $argList += '-KeepCodex' }
     if ($KeepProfile)    { $argList += '-KeepProfile' }
     Start-Process powershell -ArgumentList $argList -Verb RunAs -Wait
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
@@ -134,6 +136,19 @@ if (-not $KeepClaudeCode) {
         Ok 'claude-code uninstalled'
     } else {
         Warn 'claude CLI not found, skipping'
+    }
+}
+
+# ---------- codex CLI ----------
+# The gc2cc-managed CODEX_HOME lives inside $InstallDir and is wiped with it;
+# only the npm-global `@openai/codex` binary needs separate uninstall here.
+if (-not $KeepCodex) {
+    if (Get-Command codex -ErrorAction SilentlyContinue) {
+        Info 'Uninstalling @openai/codex ...'
+        npm uninstall -g '@openai/codex' 2>&1 | Out-Null
+        Ok 'codex uninstalled'
+    } else {
+        Warn 'codex CLI not found, skipping'
     }
 }
 

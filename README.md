@@ -5,12 +5,14 @@
 [![NSSM downloads](https://img.shields.io/github/downloads/bakapiano/gc2cc/nssm-2.24/nssm-2.24.zip?label=nssm.zip%20pulls&color=gray)](https://github.com/bakapiano/gc2cc/releases/tag/nssm-2.24)
 [![Last commit](https://img.shields.io/github/last-commit/bakapiano/gc2cc?label=last%20commit)](https://github.com/bakapiano/gc2cc/commits/main)
 
-Run **Claude Code** backed by **GitHub Copilot's models** on Windows, with a one-line installer.
+Run **Claude Code** *or* **OpenAI Codex CLI** backed by **GitHub Copilot's models** on Windows, with a one-line installer.
 
 What this gives you:
 
 - A Windows Service (`gc2cc-copilot-api`, managed via [NSSM](https://nssm.cc/)) that auto-starts at boot, runs as `LocalSystem` in the background, and auto-restarts on crash. It proxies GitHub Copilot to an OpenAI/Anthropic-compatible endpoint on `http://localhost:4141`.
 - A `ccp` command **on user PATH** that picks a model and launches `claude --dangerously-skip-permissions` against the proxy. Works in any shell — PS 5.1, PS 7, VSCode terminal, cmd. No profile editing.
+- A `cxp` command (optional, opt-in at install) that does the same for [`@openai/codex`](https://github.com/openai/codex). Uses an **isolated `CODEX_HOME`** under `%LOCALAPPDATA%\gc2cc\codex-home\`, so your own `~/.codex/config.toml` is never touched. Only OpenAI-Responses-capable models (gpt-5.x, gpt-5-codex, gemini-3.x) are listed, since `wire_api = "chat"` is no longer supported by codex.
+- At install time you pick which wrappers to deploy (ccp, cxp, both, or neither).
 - The model menu is **built dynamically** from the proxy's `/v1/models` — restart the service and any new Copilot model (gpt-5.5, gpt-5.6, claude-opus-4.8, …) shows up automatically. No need to bump `ccp.ps1`.
 - The proxy is [`caozhiyuan/copilot-api`](https://github.com/caozhiyuan/copilot-api) (a.k.a. `@jeffreycao/copilot-api` on npm) — the actively maintained fork of `ericc-ch/copilot-api`. Translates between Anthropic Messages / OpenAI Chat Completions / OpenAI Responses APIs so 1M-context Claude models, gpt-5.5 / 5.4 / 5.3-codex, and Anthropic-native features (`interleaved-thinking`, `advanced-tool-use`, `context-management`) all work end-to-end through Claude Code.
 
@@ -61,7 +63,14 @@ ccp --help                            # show ccp usage + current settings
 
 ccp config                            # interactive: pick default model + toggle bypass-permissions
 ccp upgrade                           # re-run the gc2cc one-liner installer (UAC will pop)
+
+cxp                                   # same idea but for OpenAI Codex CLI
+cxp -Model gpt-5.5 -- exec "say hi"   # `--` forwards the rest to codex
+cxp config                            # interactive: pick default model
+cxp --help                            # show cxp usage + current settings
 ```
+
+`cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`).
 
 ### First-run wizard
 
@@ -156,7 +165,9 @@ Either path always runs `npm install -g @jeffreycao/copilot-api@latest`, so a re
 irm https://bakapiano.github.io/gc2cc/uninstall.ps1 | iex
 ```
 
-Self-elevates via UAC, then removes the service, the install dir (including `bin/` and `npm/`), the user-PATH entry, the global `@anthropic-ai/claude-code` package, and any legacy `ccp` block left over in `$PROFILE`. Also best-effort cleans up legacy Scheduled Tasks from pre-NSSM installs.
+Self-elevates via UAC, then removes the service, the install dir (including `bin/`, `npm/`, and `codex-home/`), the user-PATH entry, the global `@anthropic-ai/claude-code` and `@openai/codex` packages, and any legacy `ccp` block left over in `$PROFILE`. Also best-effort cleans up legacy Scheduled Tasks from pre-NSSM installs.
+
+Pass `-KeepClaudeCode` / `-KeepCodex` to leave the corresponding npm-global package in place.
 
 The GitHub Copilot auth token at `~\.local\share\copilot-api\github_token` is **not** removed — delete it manually for a full reset.
 
@@ -169,7 +180,9 @@ irm https://bakapiano.github.io/gc2cc/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1 -Port 5151 -SkipClaudeCode
 ```
 
-Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-SkipClaudeCode`, `-SkipPath`.
+Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-SkipClaudeCode`, `-SkipPath`, `-InstallClis`, `-NonInteractive`.
+
+`-InstallClis` accepts a comma-separated list (`ccp`, `cxp`, `ccp,cxp`, or empty string for proxy-only). Without it, the installer prompts interactively. `-NonInteractive` skips the prompt and defaults to `ccp`.
 
 `-NpmPackage` defaults to `@jeffreycao/copilot-api@latest`. Pin a version (`@jeffreycao/copilot-api@1.10.7`) or swap to a different fork (`@somebody-else/copilot-api@latest`) without code changes.
 
@@ -182,6 +195,9 @@ Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-
 | `%LOCALAPPDATA%\gc2cc\bin\nssm.exe` | NSSM service wrapper |
 | `%LOCALAPPDATA%\gc2cc\bin\ccp.ps1` | model-picker + claude launcher (PowerShell) |
 | `%LOCALAPPDATA%\gc2cc\bin\ccp.cmd` | shim for cmd / non-PowerShell shells |
+| `%LOCALAPPDATA%\gc2cc\bin\cxp.ps1` | model-picker + codex launcher (PowerShell, opt-in) |
+| `%LOCALAPPDATA%\gc2cc\bin\cxp.cmd` | shim for cmd / non-PowerShell shells |
+| `%LOCALAPPDATA%\gc2cc\codex-home\config.toml` | isolated `CODEX_HOME` for cxp; defines `model_providers.gc2cc` |
 | `%LOCALAPPDATA%\gc2cc\logs\copilot-api.log` | proxy stdout/stderr (NSSM rotated at 5 MB) |
 | `%LOCALAPPDATA%\gc2cc\logs\install.log` | install transcript (handy when self-elevation fails) |
 | `~\.local\share\copilot-api\github_token` | GitHub Copilot auth (created by `copilot-api auth`) |

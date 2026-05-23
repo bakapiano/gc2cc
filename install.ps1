@@ -36,7 +36,12 @@ param(
     [string] $UserHome     = $env:USERPROFILE,
     [switch] $SkipAuth,
     [switch] $SkipClaudeCode,
-    [switch] $SkipPath
+    [switch] $SkipPath,
+    # Comma-separated list of CLIs to install: ccp,cxp. Defaults to interactive
+    # picker (unless -NonInteractive is set, in which case it defaults to ccp).
+    # Pass an empty string to skip CLI install entirely (proxy-only).
+    [string] $InstallClis    = $null,
+    [switch] $NonInteractive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +85,41 @@ function Ensure-Cmd {
 # $MyInvocation -- with `irm | iex` there is no script path to point at.
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+# Ask which CLIs to install BEFORE self-elevation. Doing it pre-UAC means the
+# prompt appears in the *user's* original shell where they can actually see
+# the menu and use the keyboard; the elevated child window often steals focus
+# and runs in a fresh non-interactive context. The selection is forwarded to
+# the elevated child via -InstallClis.
+if ($null -eq $InstallClis) {
+    if ($NonInteractive) {
+        $InstallClis = 'ccp'
+    } else {
+        Write-Host ''
+        Write-Host '[gc2cc] Which CLI wrappers do you want installed?' -ForegroundColor Cyan
+        Write-Host '  [1] ccp  -- Claude Code  (claude --dangerously-skip-permissions)'
+        Write-Host '  [2] cxp  -- OpenAI Codex CLI  (zero-pollution: isolated CODEX_HOME)'
+        Write-Host '  [3] both (default)'
+        Write-Host '  [0] none (proxy-only, no wrapper)'
+        $pick = Read-Host 'Select [Enter=3]'
+        if ([string]::IsNullOrWhiteSpace($pick)) { $pick = '3' }
+        switch ($pick.Trim()) {
+            '0' { $InstallClis = '' }
+            '1' { $InstallClis = 'ccp' }
+            '2' { $InstallClis = 'cxp' }
+            '3' { $InstallClis = 'ccp,cxp' }
+            default {
+                Warn "Unrecognized choice '$pick'; defaulting to both."
+                $InstallClis = 'ccp,cxp'
+            }
+        }
+        Write-Host ''
+    }
+}
+$cliSet = @($InstallClis -split '[,;\s]+' | Where-Object { $_ } | ForEach-Object { $_.ToLower() })
+$WantCcp = $cliSet -contains 'ccp'
+$WantCxp = $cliSet -contains 'cxp'
+
 if (-not $isAdmin) {
     Info 'NSSM service registration requires Administrator. Re-launching via UAC...'
     $tmp = Join-Path $env:TEMP ('gc2cc-install-{0}.ps1' -f ([Guid]::NewGuid()))
@@ -107,6 +147,8 @@ if (-not $isAdmin) {
     if ($SkipAuth)       { $argList += '-SkipAuth' }
     if ($SkipClaudeCode) { $argList += '-SkipClaudeCode' }
     if ($SkipPath)       { $argList += '-SkipPath' }
+    if ($NonInteractive) { $argList += '-NonInteractive' }
+    if ($null -ne $InstallClis) { $argList += @('-InstallClis', "`"$InstallClis`"") }
     Start-Process powershell -ArgumentList $argList -Verb RunAs -Wait
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     return
@@ -360,36 +402,91 @@ Ok "Service running: http://localhost:$Port"
 # ---------- 8. Claude Code CLI ----------
 # We're elevated here, so plain `npm install -g` would land in the admin
 # profile's prefix. Pin npm's prefix to the invoking user's npm dir so
-# `claude` ends up on *their* PATH.
-if (-not $SkipClaudeCode) {
-    $npmPrefixUser = Join-Path $UserHome 'AppData\Roaming\npm'
-    if ($env:USERPROFILE -ne $UserHome) {
-        $env:npm_config_prefix = $npmPrefixUser
+# `claude` / `codex` end up on *their* PATH.
+$npmPrefixUser = Join-Path $UserHome 'AppData\Roaming\npm'
+if ($env:USERPROFILE -ne $UserHome) {
+    $env:npm_config_prefix = $npmPrefixUser
+}
+
+function Install-NpmCli {
+    param([string]$Pkg, [string]$BinName)
+    if (Get-Command $BinName -ErrorAction SilentlyContinue) {
+        Ok "$BinName CLI present: $((Get-Command $BinName).Source)"
+        return
     }
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
-        Ok "claude CLI present: $((Get-Command claude).Source)"
+    Info "Installing $Pkg globally (prefix=$npmPrefixUser)..."
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & npm --prefix $npmPrefixUser install -g $Pkg 2>&1 | Out-Null
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if (-not (Test-Path (Join-Path $npmPrefixUser "$BinName.cmd"))) {
+        Warn "npm install $Pkg reported success but $BinName.cmd not found. Restart your shell."
     } else {
-        Info "Installing @anthropic-ai/claude-code globally (prefix=$npmPrefixUser)..."
-        $prev = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            & npm --prefix $npmPrefixUser install -g '@anthropic-ai/claude-code' 2>&1 | Out-Null
-        } finally {
-            $ErrorActionPreference = $prev
-        }
-        if (-not (Test-Path (Join-Path $npmPrefixUser 'claude.cmd'))) {
-            Warn 'npm install reported success but claude.cmd not found. Restart your shell and try `ccp`.'
-        } else {
-            Ok "claude installed: $npmPrefixUser\claude.cmd"
-        }
+        Ok "$BinName installed: $npmPrefixUser\$BinName.cmd"
     }
 }
 
-# ---------- 9. ccp on PATH ----------
+if ($WantCcp -and -not $SkipClaudeCode) {
+    Install-NpmCli -Pkg '@anthropic-ai/claude-code' -BinName 'claude'
+}
+
+# ---------- 8b. Codex CLI + isolated CODEX_HOME ----------
+# Zero-pollution principle: gc2cc maintains its own CODEX_HOME under InstallDir,
+# so the user's ~/.codex/config.toml (if any) is never read or written by cxp.
+# The provider definition points at the local copilot-api proxy with the
+# Responses wire API (the only one codex supports as of 2025+).
+if ($WantCxp) {
+    Install-NpmCli -Pkg '@openai/codex' -BinName 'codex'
+
+    $CodexHome = Join-Path $InstallDir 'codex-home'
+    New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
+    $codexCfgPath = Join-Path $CodexHome 'config.toml'
+    $codexCfg = @"
+# gc2cc-managed Codex config -- DO NOT EDIT BY HAND.
+# Activated only when CODEX_HOME points at this directory (set by cxp.ps1).
+# Your own ~/.codex/config.toml is unaffected.
+
+model_provider = "gc2cc"
+model = "gpt-5.5"
+# Quiet sandbox defaults so codex runs interactively without prompting on every
+# tool call. Adjust via `cxp` flags or by editing this file if you regenerate.
+approval_policy = "on-failure"
+
+[model_providers.gc2cc]
+name = "gc2cc copilot-api"
+base_url = "http://localhost:$Port/v1"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = false
+"@
+    Set-Content -Path $codexCfgPath -Value $codexCfg -Encoding UTF8
+    Ok "codex config written: $codexCfgPath"
+}
+
+# ---------- 9. ccp / cxp wrappers on PATH ----------
 if (-not $SkipPath) {
-    Info "Deploying ccp.ps1 and ccp.cmd to $BinDir ..."
-    Invoke-WebRequest -Uri "$PagesBaseUrl/ccp.ps1" -OutFile (Join-Path $BinDir 'ccp.ps1') -UseBasicParsing
-    Invoke-WebRequest -Uri "$PagesBaseUrl/ccp.cmd" -OutFile (Join-Path $BinDir 'ccp.cmd') -UseBasicParsing
+    $wrapperBases = @()
+    if ($WantCcp) { $wrapperBases += 'ccp' }
+    if ($WantCxp) { $wrapperBases += 'cxp' }
+
+    foreach ($w in $wrapperBases) {
+        Info "Deploying $w.ps1 and $w.cmd to $BinDir ..."
+        # Prefer same-directory local copies (developer iteration before publish);
+        # fall back to fetching from Pages.
+        $scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { $null }
+        foreach ($ext in @('ps1','cmd')) {
+            $dst = Join-Path $BinDir "$w.$ext"
+            $localSrc = if ($scriptRoot) { Join-Path $scriptRoot "$w.$ext" } else { $null }
+            if ($localSrc -and (Test-Path $localSrc)) {
+                Copy-Item $localSrc $dst -Force
+            } else {
+                Invoke-WebRequest -Uri "$PagesBaseUrl/$w.$ext" -OutFile $dst -UseBasicParsing
+            }
+        }
+    }
 
     if ($env:USERPROFILE -eq $UserHome) {
         $userPath = [Environment]::GetEnvironmentVariable('Path','User')
@@ -435,9 +532,17 @@ Write-Host ('  proxy pkg   : {0}' -f $NpmPackage)
 Write-Host ('  proxy entry : {0}' -f $copilotEntry)
 Write-Host ('  logs        : {0}' -f $LogDir)
 Write-Host ''
-Write-Host '  ccp is now on PATH for new shells (PS5.1, PS7, cmd, VSCode terminal).'
-Write-Host '  Open a fresh window, then try:'
-Write-Host '    ccp          # pick a Copilot-backed model, then claude'
+$wrapperList = @()
+if ($WantCcp) { $wrapperList += 'ccp' }
+if ($WantCxp) { $wrapperList += 'cxp' }
+if ($wrapperList.Count -gt 0) {
+    Write-Host ('  wrappers    : {0}' -f ($wrapperList -join ', '))
+    Write-Host '  Open a fresh window, then try:'
+    if ($WantCcp) { Write-Host '    ccp          # Claude Code via Copilot' }
+    if ($WantCxp) { Write-Host '    cxp          # OpenAI Codex via Copilot' }
+} else {
+    Write-Host '  wrappers    : (none -- proxy-only install)'
+}
 Write-Host ''
 Write-Host '  Service controls (admin):'
 Write-Host ('    Get-Service     {0}' -f $ServiceName)
