@@ -317,8 +317,22 @@ function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
     $env:DISABLE_NON_ESSENTIAL_MODEL_CALLS        = '1'
     $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
 
+    # Auto-compact: Claude Code's built-in threshold is derived from the
+    # *known* context window of canonical Anthropic model ids. Our routed
+    # ids (`claude-opus-4.7`, `claude-opus-4.7[1m]`, `gpt-5.5`, etc.) aren't
+    # in that table, so the threshold either never fires or fires at the
+    # wrong size. Pin it explicitly via CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    # (which the binary documents as "set and takes precedence"):
+    #   - [1m] variants: 800k tokens (~80% of 1M upstream window)
+    #   - everything else: 160k tokens (~80% of the standard 200k window)
+    if ($mainModel -match '\[1m\]$') {
+        $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = '800000'
+    } else {
+        $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = '160000'
+    }
+
     $bypassNote = if ($cfg.bypassPermissions) { 'on' } else { 'off' }
-    Write-Host ('[ccp] main={0}  small={1}  bypass={2}' -f $mainModel, $small, $bypassNote) -ForegroundColor Cyan
+    Write-Host ('[ccp] main={0}  small={1}  bypass={2}  autoCompactAt={3}' -f $mainModel, $small, $bypassNote, $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW) -ForegroundColor Cyan
     if ($cfg.bypassPermissions) {
         & claude @passthrough --dangerously-skip-permissions
     } else {
