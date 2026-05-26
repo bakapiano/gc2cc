@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     - Installs prereqs (git, node) via winget if missing. (No longer needs bun.)
-    - Installs caozhiyuan/copilot-api globally via npm (`@jeffreycao/copilot-api`).
+    - Installs bakapiano/copilot-api (a fork of caozhiyuan's with a fix for
+      Claude Code's `[1m]` 1M-context model id) globally via npm tarball.
     - Runs the interactive GitHub Copilot device-code auth flow once.
     - Registers a Windows Service `gc2cc-copilot-api` via NSSM that runs the
       proxy as LocalSystem, auto-restarts on crash, and rotates logs natively.
@@ -26,7 +27,7 @@ param(
     [int]    $Port         = 4141,
     [string] $ServiceName  = 'gc2cc-copilot-api',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
-    [string] $NpmPackage   = '@jeffreycao/copilot-api@latest',
+    [string] $NpmPackage   = 'https://github.com/bakapiano/copilot-api/releases/download/v1.10.13-1m-8b2e164/bakapiano-copilot-api-1.10.13-1m.tgz',
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
     # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
@@ -362,7 +363,7 @@ Info "Registering service '$ServiceName' (port $Port) via NSSM..."
 & $nssm install     $ServiceName $nodeExe $copilotEntry start --port $Port | Out-Null
 & $nssm set $ServiceName AppDirectory  $InstallDir | Out-Null
 & $nssm set $ServiceName DisplayName   'gc2cc Copilot API proxy' | Out-Null
-& $nssm set $ServiceName Description   'GitHub Copilot -> OpenAI/Anthropic proxy (caozhiyuan/copilot-api @jeffreycao/copilot-api)' | Out-Null
+& $nssm set $ServiceName Description   'GitHub Copilot -> OpenAI/Anthropic proxy (bakapiano/copilot-api, fork of caozhiyuan/copilot-api with [1m] context fix)' | Out-Null
 & $nssm set $ServiceName Start         SERVICE_AUTO_START | Out-Null
 & $nssm set $ServiceName ObjectName    LocalSystem | Out-Null
 # Service runs as LocalSystem, whose default USERPROFILE points at systemprofile
