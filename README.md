@@ -105,7 +105,7 @@ Settings live in `~/.local/share/gc2cc/ccp.json`:
 The menu is built fresh from the proxy each time, with these rules:
 
 - Embedding models, Microsoft router shims, and dated snapshots (e.g. `gpt-4o-2024-08-06`) are filtered out.
-- The `[1m]`, `-1m-internal`, `-high`, `-xhigh` suffixes are stripped from model ids — see the warning below.
+- Model ids are passed through verbatim from the proxy. In particular, the `[1m]` marker that `copilot-api` attaches to 1M-context SKUs (e.g. `claude-opus-4.7-1m-internal[1m]`) is preserved — Claude Code reads it to enable its 1M-context UI/budget and strips it before forwarding the request upstream.
 - Preferred families bubble to the top: `claude-opus-4.7` → `gpt-5.5` → `gpt-5.4` → `gemini-3.1-pro` → ...
 - The "small/fast" model is picked by family (Claude → `claude-haiku-4.5`, GPT-5 → `gpt-5-mini`, etc).
 
@@ -115,7 +115,7 @@ Quoting `caozhiyuan/copilot-api`'s README verbatim:
 
 > When using with Claude Code, please configure the model ID as `claude-opus-4-6` or `claude-opus-4.6` (**without the `[1m]` suffix**, exceeding GitHub Copilot's context window limit too much may lead to **being banned**).
 
-`ccp` already strips the suffix for you. If you hand-edit `settings.json` or override env vars, follow the same rule — the proxy advertises `[1m]` only so Claude Code's UI marks the model as 1M-capable, **not** because you should request it.
+`ccp` exposes 1M-context SKUs as separate menu entries (e.g. `claude-opus-4.7-1m-internal[1m]` alongside `claude-opus-4.7`) so you can pick them deliberately. The bare ids are the standard ~200k SKUs; the `[1m]` variants route to GitHub Copilot's 1M-capable channel. Don't hand-edit `settings.json` to append `[1m]` to an arbitrary id — the proxy only advertises `[1m]` on ids the upstream confirms support a 1M context window.
 
 GitHub's abuse-detection systems flag bulk/automated Copilot traffic. Use this responsibly:
 

@@ -142,16 +142,24 @@ function Get-ModelRank($id) {
 }
 
 # /v1/models lists everything the upstream Copilot account can see, including
-# embeddings and Microsoft-internal routers. This returns just the chat-useful
-# subset, with [1m]/-1m/-1m-internal/-high/-xhigh suffixes canonicalized, and
-# a separate `base[1m]` entry emitted when the base model has a 1M-capable
-# upstream variant. Per caozhiyuan's README warning:
-#   "When using with Claude Code, please configure the model ID as
-#   `claude-opus-4-6` or `claude-opus-4.6` (without the `[1m]` suffix,
-#   exceeding GitHub Copilot's context window limit too much may lead to
-#   being banned)."
-# So the bare id is always the default (sorted first); the [1m] variant is
-# only shown for users who explicitly want 1M context.
+# embeddings and Microsoft-internal routers. We just drop the non-chat noise
+# and pass the ids through verbatim.
+#
+# About the `[1m]` suffix: caozhiyuan/copilot-api PR #231 appends `[1m]` to
+# the model id in `/v1/models` whenever the upstream Copilot capability
+# reports `max_context_window_tokens === 1_000_000`. Claude Code reads back
+# `/\[1m\]/i` on ANTHROPIC_MODEL to switch its UI/budget into 1M-context
+# mode, then strips the `[1m]` marker before sending the request -- so an
+# id like `claude-opus-4.7-1m-internal[1m]` arrives upstream as the bare
+# `claude-opus-4.7-1m-internal`, which is the real 1M-capable SKU.
+#
+# Earlier revisions of this script stripped `-1m` / `-1m-internal` /
+# `-high` / `-xhigh` and emitted a synthesized `<base>[1m]` entry. That
+# broke 1M context: Claude Code would send the bare base id (e.g.
+# `claude-opus-4.7`), which is the 200k SKU, and the upstream would
+# enforce its standard ~168k prompt limit -- exactly the
+# `prompt token count exceeds the limit of 168000` error this script
+# was supposed to enable users to avoid. Don't reintroduce stripping.
 function Get-AvailableModels {
     $raw = (Invoke-WebRequest "$base/v1/models" -TimeoutSec 4 -UseBasicParsing).Content
     $drop = @(
@@ -166,31 +174,13 @@ function Get-AvailableModels {
         '^gemini-2\.5-'                          # superseded by 3.x
     )
     $dropOwners  = @('Experimental','Fireworks')
-    $stripSuffix = '(?:\[1m\]|-1m(?:-internal)?|-(high|xhigh))$'
-    $is1mRe      = '(?:\[1m\]|-1m(?:-internal)?)'
 
-    $entries = ($raw | ConvertFrom-Json).data | ForEach-Object {
+    $models = ($raw | ConvertFrom-Json).data | ForEach-Object {
         if ($dropOwners -contains $_.owned_by) { return }
         foreach ($p in $drop) { if ($_.id -match $p) { return } }
-        $clean = $_.id
-        while ($clean -match $stripSuffix) { $clean = $clean -replace $stripSuffix, '' }
-        [pscustomobject]@{
-            id    = $clean
-            owner = $_.owned_by
-            is1m  = ($_.id -match $is1mRe)
-        }
-    } | Sort-Object id, is1m -Unique
+        [pscustomobject]@{ id = $_.id; owner = $_.owned_by }
+    } | Sort-Object id -Unique
 
-    $baseModels = $entries | Group-Object id | ForEach-Object { $_.Group[0] }
-    $has1m = @{}
-    foreach ($e in $entries) { if ($e.is1m) { $has1m[$e.id] = $true } }
-    $models = @()
-    foreach ($m in $baseModels) {
-        $models += [pscustomobject]@{ id = $m.id; owner = $m.owner }
-        if ($has1m.ContainsKey($m.id)) {
-            $models += [pscustomobject]@{ id = "$($m.id)[1m]"; owner = $m.owner }
-        }
-    }
     return ,($models | Sort-Object @{e={Get-ModelRank $_.id}}, id)
 }
 
