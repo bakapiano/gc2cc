@@ -504,19 +504,34 @@ if (-not $SkipPath) {
     }
     if (($env:Path -split ';') -notcontains $BinDir) { $env:Path = "$env:Path;$BinDir" }
 
-    # Strip any legacy gc2cc sentinel block from $PROFILE (very old installs
-    # put `ccp` there as a function; the PATH-mounted script supersedes it).
+    # Strip any legacy gc2cc remnants from $PROFILE. Very old installs put
+    # `ccp` (and later `cxp`) into $PROFILE as functions / aliases; the
+    # PATH-mounted scripts under $BinDir supersede them, but a function in
+    # $PROFILE wins over a PATH command and will silently shadow the new
+    # version -- so any reinstall must scrub the profile clean.
+    #
+    # We strip three shapes, defensively, in case the user has hand-edited:
+    #   1. Sentinel block: `# >>> gc2cc ... BEGIN ... # <<< gc2cc ... END`
+    #   2. Standalone `function ccp { ... }` / `function cxp { ... }` blocks
+    #   3. Single-line `Set-Alias ccp ...` / `New-Alias cxp ...`
     $profilePath = $PROFILE
     if (Test-Path $profilePath) {
         $existing = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
         if ($existing) {
-            $begin   = '# >>> gc2cc ccp BEGIN -- managed by gc2cc installer'
-            $end     = '# <<< gc2cc ccp END'
-            $pattern = [Regex]::Escape($begin) + '[\s\S]*?' + [Regex]::Escape($end) + '\r?\n?'
-            $cleaned = [Regex]::Replace($existing, $pattern, '').TrimEnd()
+            $cleaned = $existing
+            # 1. Sentinel block (both legacy `gc2cc ccp` and any future cxp variant)
+            $cleaned = [Regex]::Replace($cleaned,
+                '# >>> gc2cc[^\r\n]*BEGIN[\s\S]*?# <<< gc2cc[^\r\n]*END\r?\n?', '')
+            # 2. Standalone function ccp / cxp (multi-line, brace-balanced assumed)
+            $cleaned = [Regex]::Replace($cleaned,
+                '(?ms)^\s*function\s+(ccp|cxp)\b.*?^\}\s*\r?\n?', '')
+            # 3. Set-Alias / New-Alias lines for ccp / cxp
+            $cleaned = (($cleaned -split "`r?`n") |
+                Where-Object { $_ -notmatch '^\s*(Set-Alias|New-Alias)\s+(-Name\s+)?(ccp|cxp)\b' }) -join "`r`n"
+            $cleaned = $cleaned.TrimEnd()
             if ($cleaned -ne $existing.TrimEnd()) {
                 Set-Content -Path $profilePath -Value $cleaned -Encoding UTF8
-                Info "Removed legacy gc2cc block from $profilePath."
+                Info "Removed legacy gc2cc ccp/cxp definitions from $profilePath."
             }
         }
     }
