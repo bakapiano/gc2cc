@@ -38,9 +38,13 @@ param(
     [switch] $SkipClaudeCode,
     [switch] $SkipPath,
     # Comma-separated list of CLIs to install: ccp,cxp. Defaults to interactive
-    # picker (unless -NonInteractive is set, in which case it defaults to ccp).
-    # Pass an empty string to skip CLI install entirely (proxy-only).
-    [string] $InstallClis    = $null,
+    # picker (unless -NonInteractive is set, in which case it defaults to both).
+    # Pass 'none' to skip CLI install entirely (proxy-only). Sentinel default
+    # '__ASK__' distinguishes "user did not pass the flag" from "user passed
+    # empty string" -- a plain [string] $InstallClis = $null silently becomes
+    # '' due to PS type coercion, so `$null -eq $InstallClis` never triggers
+    # and the menu would be skipped on `irm | iex` (no positional args).
+    [string] $InstallClis    = '__ASK__',
     [switch] $NonInteractive
 )
 
@@ -91,9 +95,9 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 # the menu and use the keyboard; the elevated child window often steals focus
 # and runs in a fresh non-interactive context. The selection is forwarded to
 # the elevated child via -InstallClis.
-if ($null -eq $InstallClis) {
+if ($InstallClis -eq '__ASK__') {
     if ($NonInteractive) {
-        $InstallClis = 'ccp'
+        $InstallClis = 'ccp,cxp'
     } else {
         Write-Host ''
         Write-Host '[gc2cc] Which CLI wrappers do you want installed?' -ForegroundColor Cyan
@@ -104,7 +108,7 @@ if ($null -eq $InstallClis) {
         $pick = Read-Host 'Select [Enter=3]'
         if ([string]::IsNullOrWhiteSpace($pick)) { $pick = '3' }
         switch ($pick.Trim()) {
-            '0' { $InstallClis = '' }
+            '0' { $InstallClis = 'none' }
             '1' { $InstallClis = 'ccp' }
             '2' { $InstallClis = 'cxp' }
             '3' { $InstallClis = 'ccp,cxp' }
@@ -116,7 +120,7 @@ if ($null -eq $InstallClis) {
         Write-Host ''
     }
 }
-$cliSet = @($InstallClis -split '[,;\s]+' | Where-Object { $_ } | ForEach-Object { $_.ToLower() })
+$cliSet = @($InstallClis -split '[,;\s]+' | Where-Object { $_ -and $_ -ne 'none' } | ForEach-Object { $_.ToLower() })
 $WantCcp = $cliSet -contains 'ccp'
 $WantCxp = $cliSet -contains 'cxp'
 
@@ -148,7 +152,7 @@ if (-not $isAdmin) {
     if ($SkipClaudeCode) { $argList += '-SkipClaudeCode' }
     if ($SkipPath)       { $argList += '-SkipPath' }
     if ($NonInteractive) { $argList += '-NonInteractive' }
-    if ($null -ne $InstallClis) { $argList += @('-InstallClis', "`"$InstallClis`"") }
+    $argList += @('-InstallClis', "`"$InstallClis`"")
     Start-Process powershell -ArgumentList $argList -Verb RunAs -Wait
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     return
