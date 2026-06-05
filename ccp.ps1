@@ -122,23 +122,33 @@ function Pick-Small($id) {
     }
 }
 
-# Sort key: preferred families bubble to the top, then by id.
+# Sort key: family bucket first (smaller = higher priority), then version
+# descending within bucket (so claude-opus-4.8 outranks 4.7 automatically when
+# GitHub rolls out new SKUs -- no ccp edit needed). Final tiebreak is the raw
+# id string (handled by the caller's secondary Sort-Object), which keeps
+# variants like `-high`/`-xhigh`/`[1m]` clustered next to their base id.
 function Get-ModelRank($id) {
-    switch -regex ($id) {
-        '^claude-opus-4\.7'  { return 0 }
-        '^claude-opus-4\.6'  { return 1 }
-        '^gpt-5\.5'          { return 2 }
-        '^gpt-5\.4'          { return 3 }
-        '^gpt-5\.3'          { return 4 }
-        '^gpt-5\.2'          { return 5 }
-        '^claude-sonnet-4\.' { return 6 }
-        '^gemini-3\.'        { return 7 }
-        '^gemini-'           { return 8 }
-        '^claude-haiku-'     { return 9 }
-        '^gpt-5-mini'        { return 10 }
-        '^gpt-4\.'           { return 11 }
-        default              { return 99 }
+    $tier = switch -regex ($id) {
+        '^claude-opus-'     { 100; break }
+        '^gpt-5(?:\.\d+)?-codex' { 800; break }
+        '^gpt-5(?:\.\d+)?-mini'  { 700; break }
+        '^gpt-5-mini'       { 700; break }
+        '^gpt-5\.'          { 200; break }
+        '^claude-sonnet-'   { 300; break }
+        '^gemini-3\.'       { 400; break }
+        '^gemini-'          { 500; break }
+        '^claude-haiku-'    { 600; break }
+        '^gpt-4\.'          { 900; break }
+        default             { 999 }
     }
+    $major = 0; $minor = 0
+    if ($id -match '(?:opus|sonnet|haiku|gpt|gemini)-(\d+)(?:\.(\d+))?') {
+        $major = [int]$matches[1]
+        if ($matches[2]) { $minor = [int]$matches[2] }
+    }
+    # tier * 10000 keeps families disjoint; (1000 - major*100 - minor) inverts
+    # version order so 4.8 sorts before 4.7 under an ascending Sort-Object.
+    return $tier * 10000 + (1000 - $major * 100 - $minor)
 }
 
 # /v1/models lists everything the upstream Copilot account can see, including
@@ -178,7 +188,11 @@ function Get-AvailableModels {
     $models = ($raw | ConvertFrom-Json).data | ForEach-Object {
         if ($dropOwners -contains $_.owned_by) { return }
         foreach ($p in $drop) { if ($_.id -match $p) { return } }
-        [pscustomobject]@{ id = $_.id; owner = $_.owned_by }
+        [pscustomobject]@{
+            id    = $_.id
+            owner = $_.owned_by
+            ctx   = $_.capabilities.limits.max_context_window_tokens
+        }
     } | Sort-Object id -Unique
 
     return ,($models | Sort-Object @{e={Get-ModelRank $_.id}}, id)
@@ -309,17 +323,22 @@ function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
 
     # Auto-compact: Claude Code's built-in threshold is derived from the
     # *known* context window of canonical Anthropic model ids. Our routed
-    # ids (`claude-opus-4.7`, `claude-opus-4.7[1m]`, `gpt-5.5`, etc.) aren't
-    # in that table, so the threshold either never fires or fires at the
-    # wrong size. Pin it explicitly via CLAUDE_CODE_AUTO_COMPACT_WINDOW
-    # (which the binary documents as "set and takes precedence"):
-    #   - [1m] variants: 800k tokens (~80% of 1M upstream window)
-    #   - everything else: 160k tokens (~80% of the standard 200k window)
-    if ($mainModel -match '\[1m\]$') {
-        $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = '800000'
-    } else {
-        $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = '160000'
-    }
+    # ids (`claude-opus-4.8`, `claude-opus-4.7-1m-internal[1m]`, `gpt-5.5`,
+    # etc.) aren't in that table, so the threshold either never fires or
+    # fires at the wrong size. Pin it explicitly via
+    # CLAUDE_CODE_AUTO_COMPACT_WINDOW (the binary documents it as "set and
+    # takes precedence"), at 80% of the upstream-advertised window.
+    #
+    # We pull max_context_window_tokens from /v1/models so new SKUs (1m
+    # variants, gpt-5.5's 1.05M window, etc.) get the right threshold
+    # without ccp edits. Falls back to 200k for unknowns.
+    $ctx = $null
+    try {
+        $entry = (Get-AvailableModels) | Where-Object { $_.id -eq $mainModel } | Select-Object -First 1
+        if ($entry -and $entry.ctx) { $ctx = [int]$entry.ctx }
+    } catch {}
+    if (-not $ctx) { $ctx = 200000 }
+    $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string][int]($ctx * 0.8)
 
     $bypassNote = if ($cfg.bypassPermissions) { 'on' } else { 'off' }
     Write-Host ('[ccp] main={0}  small={1}  bypass={2}  autoCompactAt={3}' -f $mainModel, $small, $bypassNote, $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW) -ForegroundColor Cyan

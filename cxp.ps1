@@ -94,22 +94,30 @@ function Test-Proxy {
     } catch { return $false }
 }
 
+# Sort key: family bucket first (smaller = higher priority), then version
+# descending within bucket (so gpt-5.5 outranks 5.4 automatically when GitHub
+# rolls out new SKUs -- no cxp edit needed). cxp's tier order favors OpenAI
+# families first since codex is an OpenAI CLI; Anthropic/Gemini come after.
 function Get-ModelRank($id) {
-    switch -regex ($id) {
-        '^gpt-5\.5'          { return 0 }
-        '^gpt-5\.4'          { return 1 }
-        '^gpt-5\.3'          { return 2 }
-        '^gpt-5\.2'          { return 3 }
-        '^gpt-5-codex'       { return 4 }
-        '^claude-opus-4\.7'  { return 5 }
-        '^claude-opus-4\.6'  { return 6 }
-        '^claude-sonnet-4\.' { return 7 }
-        '^gemini-3\.'        { return 8 }
-        '^gemini-'           { return 9 }
-        '^gpt-5-mini'        { return 10 }
-        '^gpt-4\.'           { return 11 }
-        default              { return 99 }
+    $tier = switch -regex ($id) {
+        '^gpt-5(?:\.\d+)?-codex' { 150; break }
+        '^gpt-5(?:\.\d+)?-mini'  { 700; break }
+        '^gpt-5-mini'       { 700; break }
+        '^gpt-5\.'          { 100; break }
+        '^claude-opus-'     { 200; break }
+        '^claude-sonnet-'   { 300; break }
+        '^gemini-3\.'       { 400; break }
+        '^gemini-'          { 500; break }
+        '^claude-haiku-'    { 600; break }
+        '^gpt-4\.'          { 900; break }
+        default             { 999 }
     }
+    $major = 0; $minor = 0
+    if ($id -match '(?:opus|sonnet|haiku|gpt|gemini)-(\d+)(?:\.(\d+))?') {
+        $major = [int]$matches[1]
+        if ($matches[2]) { $minor = [int]$matches[2] }
+    }
+    return $tier * 10000 + (1000 - $major * 100 - $minor)
 }
 
 # Same filter rules as ccp -- the upstream /v1/models is shared. Additional cxp-
