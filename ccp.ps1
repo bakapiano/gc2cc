@@ -22,15 +22,26 @@
 $base       = 'http://localhost:4141'
 $pagesBase  = 'https://bakapiano.github.io/gc2cc'
 $configPath = Join-Path $HOME '.local\share\gc2cc\ccp.json'
+# The proxy (copilot-api) reads reasoning effort from ITS OWN config here, keyed
+# by bare model id. The NSSM service runs as LocalSystem but install.ps1 pins
+# HOME/USERPROFILE to this user, so os.homedir() resolves to $HOME -- we can
+# write this file without elevation; only restarting the service needs UAC.
+$proxyConfigPath = Join-Path $HOME '.local\share\copilot-api\config.json'
+$proxyService    = 'gc2cc-copilot-api'
 
 # ---------- config ----------
 function Load-CcpConfig {
-    # User-facing keys: defaultModel, bypassPermissions
+    # User-facing keys: defaultModel, bypassPermissions, reasoningEfforts
     # Internal cache keys (managed by Test-UpdateAvailable / Invoke-CcpUpgrade,
     # not surfaced in `ccp config`): updateCheckAt, updateAvailable
+    #
+    # reasoningEfforts: per-model map (bare id -> effort). Source of truth for
+    # what ccp projects into the proxy's config.json modelReasoningEfforts.
+    # Normalized to a hashtable on load (JSON round-trips it as PSCustomObject).
     $defaults = @{
         defaultModel      = $null
         bypassPermissions = $true
+        reasoningEfforts  = @{}
         updateCheckAt     = $null
         updateAvailable   = $false
     }
@@ -46,6 +57,11 @@ function Load-CcpConfig {
             $defaults[$k] = $loaded.$k
         }
     }
+    if ($loaded.PSObject.Properties.Name -contains 'reasoningEfforts' -and $loaded.reasoningEfforts) {
+        $map = @{}
+        foreach ($p in $loaded.reasoningEfforts.PSObject.Properties) { $map[$p.Name] = $p.Value }
+        $defaults['reasoningEfforts'] = $map
+    }
     return $defaults
 }
 
@@ -53,6 +69,70 @@ function Save-CcpConfig($cfg) {
     $dir = Split-Path $configPath -Parent
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $cfg | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+}
+
+# Project a per-model reasoning effort into the proxy's config.json and reload
+# the proxy so it takes effect. The proxy caches config in memory and only
+# re-reads on (re)start, so changing the value requires a service restart --
+# which needs admin. To keep normal launches UAC-free, this is a no-op when the
+# proxy already has the desired value (the common case once configured).
+#
+# Writing the file itself needs no elevation (it lives under $HOME); only the
+# Restart-Service is elevated, and only when something actually changed.
+function Sync-ProxyReasoningEffort($bareId, $effort) {
+    if (-not $bareId -or -not $effort) { return }
+    if (-not (Test-Path $proxyConfigPath)) {
+        Write-Warning "[ccp] proxy config not found at $proxyConfigPath; cannot set effort. Is the proxy installed?"
+        return
+    }
+    try {
+        $raw = Get-Content $proxyConfigPath -Raw -ErrorAction Stop
+        $proxyCfg = $raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "[ccp] proxy config is unreadable/invalid JSON; skipping effort sync: $_"
+        return
+    }
+
+    # Normalize modelReasoningEfforts (PSCustomObject from JSON) into a hashtable.
+    $efforts = @{}
+    if ($proxyCfg.PSObject.Properties.Name -contains 'modelReasoningEfforts' -and $proxyCfg.modelReasoningEfforts) {
+        foreach ($p in $proxyCfg.modelReasoningEfforts.PSObject.Properties) { $efforts[$p.Name] = $p.Value }
+    }
+
+    if ($efforts[$bareId] -eq $effort) {
+        return  # already in sync -- no write, no restart, no UAC
+    }
+    $efforts[$bareId] = $effort
+
+    # Merge back and write. Re-serialize the whole config so we preserve every
+    # other field (auth, providers, extraPrompts, etc.).
+    if ($proxyCfg.PSObject.Properties.Name -contains 'modelReasoningEfforts') {
+        $proxyCfg.modelReasoningEfforts = $efforts
+    } else {
+        $proxyCfg | Add-Member -NotePropertyName 'modelReasoningEfforts' -NotePropertyValue $efforts
+    }
+    try {
+        $proxyCfg | ConvertTo-Json -Depth 20 | Set-Content -Path $proxyConfigPath -Encoding UTF8
+    } catch {
+        Write-Warning "[ccp] failed to write proxy config: $_"
+        return
+    }
+
+    Write-Host ("[ccp] proxy reasoning effort {0} = {1}; restarting service (UAC)..." -f $bareId, $effort) -ForegroundColor Cyan
+    try {
+        Start-Process powershell -Verb RunAs -Wait -ArgumentList @(
+            '-NoProfile','-Command',"Restart-Service $proxyService"
+        ) -ErrorAction Stop
+    } catch {
+        Write-Warning "[ccp] service restart was cancelled or failed; effort is written but not yet live: $_"
+        return
+    }
+    # Wait briefly for the proxy to come back so the subsequent claude launch
+    # doesn't race a not-yet-listening service.
+    for ($i = 0; $i -lt 20; $i++) {
+        if (Test-Proxy) { break }
+        Start-Sleep -Milliseconds 300
+    }
 }
 
 # ---------- update check (24h-cached) ----------
@@ -189,13 +269,22 @@ function Get-AvailableModels {
         if ($dropOwners -contains $_.owned_by) { return }
         foreach ($p in $drop) { if ($_.id -match $p) { return } }
         [pscustomobject]@{
-            id    = $_.id
-            owner = $_.owned_by
-            ctx   = $_.capabilities.limits.max_context_window_tokens
+            id      = $_.id
+            owner   = $_.owned_by
+            ctx     = $_.capabilities.limits.max_context_window_tokens
+            efforts = $_.capabilities.supports.reasoning_effort
         }
     } | Sort-Object id -Unique
 
     return ,($models | Sort-Object @{e={Get-ModelRank $_.id}}, id)
+}
+
+# The model id Claude Code actually sends to the proxy on /v1/messages is the
+# ANTHROPIC_MODEL value with the trailing `[1m]` marker stripped (Claude strips
+# `/\[1m\]/i` before sending). The proxy's modelReasoningEfforts map is keyed by
+# that bare id, so effort config must use it too.
+function Get-BareModelId($id) {
+    return ($id -replace '\[1m\]$', '')
 }
 
 # ---------- subcommands ----------
@@ -220,6 +309,31 @@ Current settings:
   defaultModel      = $curDefault
   bypassPermissions = $($cur.bypassPermissions)
 "@
+}
+
+# Interactive effort picker for one model, constrained to that model's
+# upstream-supported list (capabilities.supports.reasoning_effort from
+# /v1/models). Returns the chosen effort, or $null for "unset / proxy default".
+# $supported is the model's effort array; $current is the stored value (or $null).
+function Read-EffortChoice($model, $supported, $current) {
+    if (-not $supported -or $supported.Count -eq 0) {
+        Write-Host ("  ({0} advertises no reasoning_effort levels; skipping)" -f $model) -ForegroundColor DarkGray
+        return $current
+    }
+    Write-Host ''
+    Write-Host ("Reasoning effort for {0} (Enter to keep current):" -f $model) -ForegroundColor Cyan
+    Write-Host '  [ 0] (unset -- proxy default, "high")'
+    for ($i = 0; $i -lt $supported.Count; $i++) {
+        $marker = if ($current -eq $supported[$i]) { ' *current*' } else { '' }
+        Write-Host ('  [{0,2}] {1}{2}' -f ($i + 1), $supported[$i], $marker)
+    }
+    $pick = Read-Host 'Number'
+    if ([string]::IsNullOrWhiteSpace($pick)) { return $current }
+    $idx = [int]$pick - 1
+    if ($idx -eq -1) { return $null }
+    if ($idx -ge 0 -and $idx -lt $supported.Count) { return $supported[$idx] }
+    Write-Warning '[ccp] invalid effort choice; keeping current'
+    return $current
 }
 
 function Invoke-CcpConfig {
@@ -254,6 +368,21 @@ function Invoke-CcpConfig {
         }
     }
 
+    # If a concrete default model is set, let the user pick its reasoning effort,
+    # constrained to that model's upstream-supported levels. Stored under the
+    # bare id (proxy's modelReasoningEfforts key).
+    if ($config.defaultModel) {
+        if (-not ($config.reasoningEfforts -is [hashtable])) { $config.reasoningEfforts = @{} }
+        $bareId   = Get-BareModelId $config.defaultModel
+        $selected = $models | Where-Object { $_.id -eq $config.defaultModel } | Select-Object -First 1
+        $eff = Read-EffortChoice $config.defaultModel $selected.efforts $config.reasoningEfforts[$bareId]
+        if ($eff) {
+            $config.reasoningEfforts[$bareId] = $eff
+        } elseif ($config.reasoningEfforts.ContainsKey($bareId)) {
+            $config.reasoningEfforts.Remove($bareId)
+        }
+    }
+
     Write-Host ''
     $bypassDefault = if ($config.bypassPermissions) { 'Y' } else { 'N' }
     $bp = Read-Host ('Bypass permissions (--dangerously-skip-permissions)? [Y/N, default {0}]' -f $bypassDefault)
@@ -267,6 +396,21 @@ function Invoke-CcpConfig {
     Write-Host "Saved to $configPath" -ForegroundColor Green
     Write-Host ('  defaultModel      = {0}' -f $newDefault)
     Write-Host ('  bypassPermissions = {0}' -f $config.bypassPermissions)
+    if ($config.defaultModel) {
+        $bareId = Get-BareModelId $config.defaultModel
+        if ($config.reasoningEfforts[$bareId]) {
+            Write-Host ('  reasoningEffort   = {0}' -f $config.reasoningEfforts[$bareId])
+        }
+    }
+
+    # Project the chosen effort into the proxy and reload it so the change takes
+    # effect (the proxy caches config in memory; only a reload/restart picks it up).
+    if ($config.defaultModel) {
+        $bareId = Get-BareModelId $config.defaultModel
+        if ($config.reasoningEfforts[$bareId]) {
+            Sync-ProxyReasoningEffort $bareId $config.reasoningEfforts[$bareId]
+        }
+    }
 }
 
 function Invoke-CcpUpgrade {
@@ -340,8 +484,18 @@ function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
     if (-not $ctx) { $ctx = 200000 }
     $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string][int]($ctx * 0.8)
 
+    # Reasoning effort: stored per bare model id. The proxy reads it from its
+    # own config.json (client-sent thinking is ignored), so make sure the proxy
+    # is in sync before launching. No-op (and no UAC) when already correct.
+    $bareId = Get-BareModelId $mainModel
+    $effort = if ($cfg.reasoningEfforts -is [hashtable]) { $cfg.reasoningEfforts[$bareId] } else { $null }
+    if ($effort) {
+        Sync-ProxyReasoningEffort $bareId $effort
+    }
+    $effortNote = if ($effort) { $effort } else { '(proxy default)' }
+
     $bypassNote = if ($cfg.bypassPermissions) { 'on' } else { 'off' }
-    Write-Host ('[ccp] main={0}  small={1}  bypass={2}  autoCompactAt={3}' -f $mainModel, $small, $bypassNote, $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW) -ForegroundColor Cyan
+    Write-Host ('[ccp] main={0}  small={1}  effort={2}  bypass={3}  autoCompactAt={4}' -f $mainModel, $small, $effortNote, $bypassNote, $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW) -ForegroundColor Cyan
     if ($cfg.bypassPermissions) {
         & claude @passthrough --dangerously-skip-permissions
     } else {

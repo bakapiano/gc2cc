@@ -18,11 +18,21 @@ $configPath = Join-Path $HOME '.local\share\gc2cc\cxp.json'
 $codexHome  = Join-Path $env:LOCALAPPDATA 'gc2cc\codex-home'
 
 # ---------- config ----------
+# Codex's native reasoning-effort enum (config.toml `model_reasoning_effort`
+# / `-c` override). Unlike ccp's Anthropic path, the proxy forwards Codex's
+# reasoning.effort untouched, so this is the real lever -- and the values are
+# OpenAI's set, NOT Copilot-Anthropic's (no xhigh/max here).
+$codexEfforts = @('minimal', 'low', 'medium', 'high')
+
 function Load-CxpConfig {
+    # reasoningEfforts: per-model map (id -> one of $codexEfforts). Stored as a
+    # PSCustomObject when round-tripped through JSON, normalized to a hashtable
+    # on load so callers can index/assign uniformly.
     $defaults = @{
-        defaultModel    = $null
-        updateCheckAt   = $null
-        updateAvailable = $false
+        defaultModel     = $null
+        reasoningEfforts = @{}
+        updateCheckAt    = $null
+        updateAvailable  = $false
     }
     if (-not (Test-Path $configPath)) { return $defaults }
     try {
@@ -35,6 +45,11 @@ function Load-CxpConfig {
         if ($loaded.PSObject.Properties.Name -contains $k) {
             $defaults[$k] = $loaded.$k
         }
+    }
+    if ($loaded.PSObject.Properties.Name -contains 'reasoningEfforts' -and $loaded.reasoningEfforts) {
+        $map = @{}
+        foreach ($p in $loaded.reasoningEfforts.PSObject.Properties) { $map[$p.Name] = $p.Value }
+        $defaults['reasoningEfforts'] = $map
     }
     return $defaults
 }
@@ -172,6 +187,26 @@ Current settings:
 "@
 }
 
+# Interactive effort picker for one model. Returns the chosen effort string,
+# or $null to mean "leave unset / keep current". $current is the model's
+# existing stored effort (or $null).
+function Read-EffortChoice($model, $current) {
+    Write-Host ''
+    Write-Host ("Reasoning effort for {0} (Enter to keep current):" -f $model) -ForegroundColor Cyan
+    Write-Host '  [ 0] (unset -- use Codex default)'
+    for ($i = 0; $i -lt $codexEfforts.Count; $i++) {
+        $marker = if ($current -eq $codexEfforts[$i]) { ' *current*' } else { '' }
+        Write-Host ('  [{0,2}] {1}{2}' -f ($i + 1), $codexEfforts[$i], $marker)
+    }
+    $pick = Read-Host 'Number'
+    if ([string]::IsNullOrWhiteSpace($pick)) { return $current }
+    $idx = [int]$pick - 1
+    if ($idx -eq -1) { return $null }
+    if ($idx -ge 0 -and $idx -lt $codexEfforts.Count) { return $codexEfforts[$idx] }
+    Write-Warning '[cxp] invalid effort choice; keeping current'
+    return $current
+}
+
 function Invoke-CxpConfig {
     if (-not (Test-Proxy)) {
         Write-Error "[cxp] copilot-api not reachable at $base. Check: Get-Service gc2cc-copilot-api"
@@ -203,11 +238,26 @@ function Invoke-CxpConfig {
         }
     }
 
+    # If a concrete default model is set, let the user pick its reasoning effort.
+    if ($config.defaultModel) {
+        if (-not ($config.reasoningEfforts -is [hashtable])) { $config.reasoningEfforts = @{} }
+        $cur = $config.reasoningEfforts[$config.defaultModel]
+        $eff = Read-EffortChoice $config.defaultModel $cur
+        if ($eff) {
+            $config.reasoningEfforts[$config.defaultModel] = $eff
+        } elseif ($config.reasoningEfforts.ContainsKey($config.defaultModel)) {
+            $config.reasoningEfforts.Remove($config.defaultModel)
+        }
+    }
+
     Save-CxpConfig $config
     $newDefault = if ($config.defaultModel) { $config.defaultModel } else { '(none -- always prompt)' }
     Write-Host ''
     Write-Host "Saved to $configPath" -ForegroundColor Green
     Write-Host ('  defaultModel = {0}' -f $newDefault)
+    if ($config.defaultModel -and $config.reasoningEfforts[$config.defaultModel]) {
+        Write-Host ('  reasoningEffort = {0}' -f $config.reasoningEfforts[$config.defaultModel])
+    }
 }
 
 function Invoke-CxpUpgrade {
@@ -248,7 +298,7 @@ function Invoke-ModelPicker {
 }
 
 # ---------- codex exec ----------
-function Invoke-CodexWithModel($mainModel, $passthrough) {
+function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
     if (-not (Test-Path (Join-Path $codexHome 'config.toml'))) {
         Write-Error "[cxp] $codexHome\config.toml not found. Re-run the gc2cc installer."
         return
@@ -259,9 +309,17 @@ function Invoke-CodexWithModel($mainModel, $passthrough) {
     $env:CODEX_HOME     = $codexHome
     $env:OPENAI_API_KEY = 'dummy'
 
-    Write-Host ('[cxp] model={0}  CODEX_HOME={1}' -f $mainModel, $codexHome) -ForegroundColor Cyan
     # `-c model=<id>` overrides the toml's `model` for this invocation only.
-    & codex -c "model=`"$mainModel`"" @passthrough
+    # The proxy forwards Codex's reasoning.effort untouched on the /v1/responses
+    # path, so an optional `-c model_reasoning_effort=<v>` is the real lever.
+    $codexArgs = @("-c", "model=`"$mainModel`"")
+    $eff = if ($cfg.reasoningEfforts -is [hashtable]) { $cfg.reasoningEfforts[$mainModel] } else { $null }
+    if ($eff) {
+        $codexArgs += @("-c", "model_reasoning_effort=`"$eff`"")
+    }
+    $effNote = if ($eff) { $eff } else { '(codex default)' }
+    Write-Host ('[cxp] model={0}  effort={1}  CODEX_HOME={2}' -f $mainModel, $effNote, $codexHome) -ForegroundColor Cyan
+    & codex @codexArgs @passthrough
 }
 
 # ---------- dispatch ----------
@@ -323,4 +381,4 @@ if (-not $main) {
     if (-not $main) { return }
 }
 
-Invoke-CodexWithModel -mainModel $main -passthrough $passthrough
+Invoke-CodexWithModel -mainModel $main -cfg $config -passthrough $passthrough
