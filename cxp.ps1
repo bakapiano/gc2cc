@@ -18,14 +18,9 @@ $configPath = Join-Path $HOME '.local\share\gc2cc\cxp.json'
 $codexHome  = Join-Path $env:LOCALAPPDATA 'gc2cc\codex-home'
 
 # ---------- config ----------
-# Codex's native reasoning-effort enum (config.toml `model_reasoning_effort`
-# / `-c` override). Unlike ccp's Anthropic path, the proxy forwards Codex's
-# reasoning.effort untouched, so this is the real lever -- and the values are
-# OpenAI's set, NOT Copilot-Anthropic's (no xhigh/max here).
-$codexEfforts = @('minimal', 'low', 'medium', 'high')
-
 function Load-CxpConfig {
-    # reasoningEfforts: per-model map (id -> one of $codexEfforts). Stored as a
+    # reasoningEfforts: per-model map (id -> effort). Levels are constrained to
+    # each model's upstream /v1/models capabilities at config time. Stored as a
     # PSCustomObject when round-tripped through JSON, normalized to a hashtable
     # on load so callers can index/assign uniformly.
     $defaults = @{
@@ -161,9 +156,22 @@ function Get-AvailableModels {
         foreach ($p in $drop) { if ($_.id -match $p) { return } }
         $clean = $_.id
         while ($clean -match $stripSuffix) { $clean = $clean -replace $stripSuffix, '' }
-        [pscustomobject]@{ id = $clean; owner = $_.owned_by }
-    } | Sort-Object id -Unique
-    return ,($entries | Sort-Object @{e={Get-ModelRank $_.id}}, id)
+        [pscustomobject]@{
+            id      = $clean
+            owner   = $_.owned_by
+            efforts = $_.capabilities.supports.reasoning_effort
+        }
+    }
+    # Dedup by id explicitly. We can't use `Sort-Object id -Unique` here: with an
+    # array-valued property (efforts) it merges the property across the
+    # duplicate rows that suffix-stripping creates (e.g. gpt-5.5 + gpt-5.5[1m]
+    # collapse to one id), flattening every model's efforts into a single bogus
+    # 35-element array. A keyed hashtable keeps the first row's efforts intact.
+    $seen = @{}
+    $unique = foreach ($e in $entries) {
+        if (-not $seen.ContainsKey($e.id)) { $seen[$e.id] = $true; $e }
+    }
+    return ,($unique | Sort-Object @{e={Get-ModelRank $_.id}}, id)
 }
 
 # ---------- subcommands ----------
@@ -187,22 +195,29 @@ Current settings:
 "@
 }
 
-# Interactive effort picker for one model. Returns the chosen effort string,
-# or $null to mean "leave unset / keep current". $current is the model's
-# existing stored effort (or $null).
-function Read-EffortChoice($model, $current) {
+# Interactive effort picker for one model, constrained to that model's
+# upstream-supported levels (capabilities.supports.reasoning_effort from
+# /v1/models). The proxy forwards Codex's reasoning.effort untouched, and Codex
+# itself passes the -c value through without validating, so the real ceiling is
+# the upstream model's own list (e.g. gpt-5.5 supports up to xhigh; gpt-5-mini
+# only to high). Returns the chosen effort, or $null for "unset / Codex default".
+function Read-EffortChoice($model, $supported, $current) {
+    if (-not $supported -or $supported.Count -eq 0) {
+        Write-Host ("  ({0} advertises no reasoning_effort levels; skipping)" -f $model) -ForegroundColor DarkGray
+        return $current
+    }
     Write-Host ''
     Write-Host ("Reasoning effort for {0} (Enter to keep current):" -f $model) -ForegroundColor Cyan
     Write-Host '  [ 0] (unset -- use Codex default)'
-    for ($i = 0; $i -lt $codexEfforts.Count; $i++) {
-        $marker = if ($current -eq $codexEfforts[$i]) { ' *current*' } else { '' }
-        Write-Host ('  [{0,2}] {1}{2}' -f ($i + 1), $codexEfforts[$i], $marker)
+    for ($i = 0; $i -lt $supported.Count; $i++) {
+        $marker = if ($current -eq $supported[$i]) { ' *current*' } else { '' }
+        Write-Host ('  [{0,2}] {1}{2}' -f ($i + 1), $supported[$i], $marker)
     }
     $pick = Read-Host 'Number'
     if ([string]::IsNullOrWhiteSpace($pick)) { return $current }
     $idx = [int]$pick - 1
     if ($idx -eq -1) { return $null }
-    if ($idx -ge 0 -and $idx -lt $codexEfforts.Count) { return $codexEfforts[$idx] }
+    if ($idx -ge 0 -and $idx -lt $supported.Count) { return $supported[$idx] }
     Write-Warning '[cxp] invalid effort choice; keeping current'
     return $current
 }
@@ -238,11 +253,13 @@ function Invoke-CxpConfig {
         }
     }
 
-    # If a concrete default model is set, let the user pick its reasoning effort.
+    # If a concrete default model is set, let the user pick its reasoning effort,
+    # constrained to that model's upstream-supported levels.
     if ($config.defaultModel) {
         if (-not ($config.reasoningEfforts -is [hashtable])) { $config.reasoningEfforts = @{} }
         $cur = $config.reasoningEfforts[$config.defaultModel]
-        $eff = Read-EffortChoice $config.defaultModel $cur
+        $selected = $models | Where-Object { $_.id -eq $config.defaultModel } | Select-Object -First 1
+        $eff = Read-EffortChoice $config.defaultModel $selected.efforts $cur
         if ($eff) {
             $config.reasoningEfforts[$config.defaultModel] = $eff
         } elseif ($config.reasoningEfforts.ContainsKey($config.defaultModel)) {
