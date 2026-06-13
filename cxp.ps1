@@ -160,6 +160,8 @@ function Get-AvailableModels {
             id      = $clean
             owner   = $_.owned_by
             efforts = $_.capabilities.supports.reasoning_effort
+            ctx     = $_.capabilities.limits.max_context_window_tokens
+            maxOut  = $_.capabilities.limits.max_output_tokens
         }
     }
     # Dedup by id explicitly. We can't use `Sort-Object id -Unique` here: with an
@@ -334,8 +336,22 @@ function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
     if ($eff) {
         $codexArgs += @("-c", "model_reasoning_effort=`"$eff`"")
     }
+    # Codex doesn't know our proxy's models, so its TUI falls back to a built-in
+    # context-window guess (~258K) for ids it doesn't recognize. Inject the real
+    # limits from /v1/models so `/status` and context tracking are accurate. The
+    # bare id carries the 1M ctx here because Get-AvailableModels strips the
+    # display-only `[1m]` suffix the proxy adds for 1M models.
+    # NB: assign to $models first. Get-AvailableModels returns a comma-wrapped
+    # array (`,(...)`); piping it straight into Where-Object passes the whole
+    # array as a single $_, so $meta.ctx member-enumerates into an Object[] and
+    # breaks the integer division below. Assignment unwraps it to a real list.
+    $models = Get-AvailableModels
+    $meta = $models | Where-Object { $_.id -eq $mainModel } | Select-Object -First 1
+    if ($meta.ctx)    { $codexArgs += @("-c", "model_context_window=$($meta.ctx)") }
+    if ($meta.maxOut) { $codexArgs += @("-c", "model_max_output_tokens=$($meta.maxOut)") }
     $effNote = if ($eff) { $eff } else { '(codex default)' }
-    Write-Host ('[cxp] model={0}  effort={1}  CODEX_HOME={2}' -f $mainModel, $effNote, $codexHome) -ForegroundColor Cyan
+    $ctxNote = if ($meta.ctx) { '{0}K' -f [int]($meta.ctx / 1000) } else { '?' }
+    Write-Host ('[cxp] model={0}  effort={1}  ctx={2}  CODEX_HOME={3}' -f $mainModel, $effNote, $ctxNote, $codexHome) -ForegroundColor Cyan
     & codex @codexArgs @passthrough
 }
 
