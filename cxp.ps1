@@ -316,6 +316,46 @@ function Invoke-ModelPicker {
     return $models[$idx].id
 }
 
+# ---------- model catalog ----------
+# Generate a complete, self-contained model catalog for codex's
+# StaticModelsManager, patching each model's context window to the value the
+# proxy actually reports. This is what delivers a true 1M window: codex clamps
+# `-c model_context_window` to the bundled max_context_window (272K), but a
+# catalog file sets BOTH context_window and max_context_window directly, so the
+# 1M lands un-clamped. The catalog is also the persistent source codex's
+# auto-compact trigger reads each turn, so the window survives compaction.
+#
+# Source: `codex debug models` (codex's own ModelsResponse), NOT a hand-written
+# file or a download. codex emits every field correctly — including the
+# mandatory ~21KB base_instructions per model — and it tracks the installed
+# codex version automatically. auto_compact_token_limit is left untouched (null
+# in the dump), so codex derives it as 90% of the patched window on its own.
+function Write-CodexCatalog($models) {
+    $catalogPath = Join-Path $codexHome 'catalog.json'
+    try {
+        $raw = & codex debug models 2>$null | Out-String
+        if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        $cat = $raw | ConvertFrom-Json
+        if (-not $cat.models) { return $null }
+        foreach ($m in $cat.models) {
+            $hit = $models | Where-Object { $_.id -eq $m.slug } | Select-Object -First 1
+            if ($hit -and $hit.ctx) {
+                $ctx = [int64]$hit.ctx
+                $m.context_window     = $ctx
+                $m.max_context_window = $ctx
+            }
+        }
+        # -Depth 100: ModelInfo is deeply nested; the default depth (2) would
+        # stringify nested arrays/objects and corrupt the file. Write UTF-8
+        # without BOM so serde_json doesn't choke on a leading byte-order mark.
+        $json = $cat | ConvertTo-Json -Depth 100 -Compress
+        [System.IO.File]::WriteAllText($catalogPath, $json, (New-Object System.Text.UTF8Encoding $false))
+        return $catalogPath
+    } catch {
+        return $null
+    }
+}
+
 # ---------- codex exec ----------
 function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
     if (-not (Test-Path (Join-Path $codexHome 'config.toml'))) {
@@ -336,22 +376,29 @@ function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
     if ($eff) {
         $codexArgs += @("-c", "model_reasoning_effort=`"$eff`"")
     }
-    # Codex doesn't know our proxy's models, so its TUI falls back to a built-in
-    # context-window guess (~258K) for ids it doesn't recognize. Inject the real
-    # limits from /v1/models so `/status` and context tracking are accurate. The
-    # bare id carries the 1M ctx here because Get-AvailableModels strips the
-    # display-only `[1m]` suffix the proxy adds for 1M models.
+    # Codex clamps `-c model_context_window=N` to the bundled max (272K for
+    # gpt-5.5), so that override can NEVER deliver the proxy's 1M window. The
+    # only un-clamped path is a model catalog file, which sets context_window
+    # AND max_context_window directly. Generate one from the real /v1/models
+    # limits and point codex at it via `model_catalog_json`.
     # NB: assign to $models first. Get-AvailableModels returns a comma-wrapped
     # array (`,(...)`); piping it straight into Where-Object passes the whole
-    # array as a single $_, so $meta.ctx member-enumerates into an Object[] and
-    # breaks the integer division below. Assignment unwraps it to a real list.
+    # array as a single $_, so $meta.ctx member-enumerates into an Object[].
     $models = Get-AvailableModels
     $meta = $models | Where-Object { $_.id -eq $mainModel } | Select-Object -First 1
-    if ($meta.ctx)    { $codexArgs += @("-c", "model_context_window=$($meta.ctx)") }
+    $catalogPath = Write-CodexCatalog $models
+    if ($catalogPath) {
+        # TOML parses the `-c` value; a Windows '\' path triggers invalid escape
+        # errors (\U, \g ...). Forward slashes are accepted by Rust on Windows
+        # and need no escaping in TOML.
+        $catalogToml = ($catalogPath -replace '\\', '/')
+        $codexArgs += @("-c", "model_catalog_json=`"$catalogToml`"")
+    }
     if ($meta.maxOut) { $codexArgs += @("-c", "model_max_output_tokens=$($meta.maxOut)") }
     $effNote = if ($eff) { $eff } else { '(codex default)' }
     $ctxNote = if ($meta.ctx) { '{0}K' -f [int]($meta.ctx / 1000) } else { '?' }
-    Write-Host ('[cxp] model={0}  effort={1}  ctx={2}  CODEX_HOME={3}' -f $mainModel, $effNote, $ctxNote, $codexHome) -ForegroundColor Cyan
+    $catNote = if ($catalogPath) { 'catalog' } else { 'bundled(272K cap)' }
+    Write-Host ('[cxp] model={0}  effort={1}  ctx={2}  via={3}  CODEX_HOME={4}' -f $mainModel, $effNote, $ctxNote, $catNote, $codexHome) -ForegroundColor Cyan
     & codex @codexArgs @passthrough
 }
 
