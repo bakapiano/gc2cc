@@ -328,8 +328,15 @@ function Invoke-ModelPicker {
 # Source: `codex debug models` (codex's own ModelsResponse), NOT a hand-written
 # file or a download. codex emits every field correctly — including the
 # mandatory ~21KB base_instructions per model — and it tracks the installed
-# codex version automatically. auto_compact_token_limit is left untouched (null
-# in the dump), so codex derives it as 90% of the patched window on its own.
+# codex version automatically.
+#
+# auto_compact_token_limit MUST be patched too. Leaving it null does NOT make
+# codex derive it from the patched context_window -- verified on 0.140.0, a
+# null limit makes codex fall back to the model's *native* window (gpt-5.5 =
+# 272K), so auto-compaction fires at ~217K (its internal ~80% trigger) even
+# though /status correctly shows the patched 1M. We set it explicitly to 90%
+# of the patched window (codex clamps any higher value to 90% anyway) so the
+# compaction trigger tracks the real window instead of the bundled 272K.
 function Write-CodexCatalog($models) {
     $catalogPath = Join-Path $codexHome 'catalog.json'
     try {
@@ -343,6 +350,9 @@ function Write-CodexCatalog($models) {
                 $ctx = [int64]$hit.ctx
                 $m.context_window     = $ctx
                 $m.max_context_window = $ctx
+                # Without this, codex compacts at ~80% of the model's *native*
+                # window, not the patched one. 0.9 == codex's own clamp ceiling.
+                $m.auto_compact_token_limit = [int64][math]::Floor($ctx * 0.9)
             }
         }
         # -Depth 100: ModelInfo is deeply nested; the default depth (2) would
