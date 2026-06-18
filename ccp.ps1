@@ -269,7 +269,13 @@ function Get-AvailableModels {
         if ($dropOwners -contains $_.owned_by) { return }
         foreach ($p in $drop) { if ($_.id -match $p) { return } }
         [pscustomobject]@{
-            id      = $_.id
+            # Prefer claude_model_id: copilot-api (PR #231) moved the `[1m]`
+            # 1M-context marker out of the top-level `id` and into this field.
+            # Claude Code only switches into 1M mode when ANTHROPIC_MODEL carries
+            # `[1m]`, so this is the id we must surface, store, and launch with.
+            # Note ctx alone is not enough to decide (gpt-5.5 is 1.05M, not 1M);
+            # trust the proxy's field. Falls back to the bare id when unset.
+            id      = if ($_.claude_model_id) { $_.claude_model_id } else { $_.id }
             owner   = $_.owned_by
             ctx     = $_.capabilities.limits.max_context_window_tokens
             efforts = $_.capabilities.supports.reasoning_effort
@@ -455,6 +461,23 @@ function Invoke-ModelPicker {
 
 # ---------- claude exec ----------
 function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
+    # Normalize the requested model against the live catalog by *bare* id, so a
+    # stored default or `-Model` value like `claude-opus-4-8` adopts the proxy's
+    # canonical surfaced id `claude-opus-4-8[1m]`. That `[1m]` marker is the only
+    # thing that flips Claude Code into 1M-context mode; a config written before
+    # the proxy moved the marker into `claude_model_id` would otherwise launch in
+    # 200k. We also capture the matched entry's ctx here and reuse it for the
+    # auto-compact window below (one /v1/models round-trip, not two).
+    $ctx = $null
+    try {
+        $bare  = Get-BareModelId $mainModel
+        $entry = (Get-AvailableModels) | Where-Object { (Get-BareModelId $_.id) -eq $bare } | Select-Object -First 1
+        if ($entry) {
+            $mainModel = $entry.id
+            if ($entry.ctx) { $ctx = [int]$entry.ctx }
+        }
+    } catch {}
+
     $small = Pick-Small $mainModel
     $env:ANTHROPIC_BASE_URL                       = $base
     $env:ANTHROPIC_AUTH_TOKEN                     = 'dummy'
@@ -473,14 +496,10 @@ function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
     # CLAUDE_CODE_AUTO_COMPACT_WINDOW (the binary documents it as "set and
     # takes precedence"), at 80% of the upstream-advertised window.
     #
-    # We pull max_context_window_tokens from /v1/models so new SKUs (1m
-    # variants, gpt-5.5's 1.05M window, etc.) get the right threshold
-    # without ccp edits. Falls back to 200k for unknowns.
-    $ctx = $null
-    try {
-        $entry = (Get-AvailableModels) | Where-Object { $_.id -eq $mainModel } | Select-Object -First 1
-        if ($entry -and $entry.ctx) { $ctx = [int]$entry.ctx }
-    } catch {}
+    # ctx (max_context_window_tokens) was already resolved above from the same
+    # /v1/models lookup that normalized the model id, so new SKUs (1m variants,
+    # gpt-5.5's 1.05M window, etc.) get the right threshold without ccp edits.
+    # Falls back to 200k for unknowns.
     if (-not $ctx) { $ctx = 200000 }
     $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = [string][int]($ctx * 0.8)
 
