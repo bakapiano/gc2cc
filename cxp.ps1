@@ -352,7 +352,11 @@ function Write-CodexCatalog($models) {
                 $m.max_context_window = $ctx
                 # Without this, codex compacts at ~80% of the model's *native*
                 # window, not the patched one. 0.9 == codex's own clamp ceiling.
-                $m.auto_compact_token_limit = [int64][math]::Floor($ctx * 0.9)
+                # Add-Member -Force, not `$m.x = `: the field deserializes from
+                # JSON null and direct assignment throws "property cannot be
+                # found", which would sink the whole catalog into the catch.
+                $m | Add-Member -MemberType NoteProperty -Name auto_compact_token_limit `
+                    -Value ([int64][math]::Floor($ctx * 0.9)) -Force
             }
         }
         # -Depth 100: ModelInfo is deeply nested; the default depth (2) would
