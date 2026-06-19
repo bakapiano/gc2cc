@@ -16,6 +16,7 @@ $base       = 'http://localhost:4141'
 $pagesBase  = 'https://bakapiano.github.io/gc2cc'
 $configPath = Join-Path $HOME '.local\share\gc2cc\cxp.json'
 $codexHome  = Join-Path $env:LOCALAPPDATA 'gc2cc\codex-home'
+$script:cxpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else { $null }
 
 # ---------- config ----------
 function Load-CxpConfig {
@@ -165,14 +166,23 @@ function Get-AvailableModels {
         }
     }
     # Dedup by id explicitly. We can't use `Sort-Object id -Unique` here: with an
-    # array-valued property (efforts) it merges the property across the
-    # duplicate rows that suffix-stripping creates (e.g. gpt-5.5 + gpt-5.5[1m]
-    # collapse to one id), flattening every model's efforts into a single bogus
-    # 35-element array. A keyed hashtable keeps the first row's efforts intact.
-    $seen = @{}
-    $unique = foreach ($e in $entries) {
-        if (-not $seen.ContainsKey($e.id)) { $seen[$e.id] = $true; $e }
+    # array-valued property (efforts) it merges the property across duplicate
+    # rows. Also do NOT keep the first duplicate blindly: suffix stripping can
+    # collapse a standard SKU and a 1M SKU into the same clean id, and whichever
+    # one the proxy lists first would otherwise decide Codex's context window.
+    # Keep the row with the largest advertised context instead.
+    $bestById = @{}
+    foreach ($e in $entries) {
+        if (-not $bestById.ContainsKey($e.id)) {
+            $bestById[$e.id] = $e
+            continue
+        }
+        $cur = $bestById[$e.id]
+        $curCtx = if ($cur.ctx) { [int64]$cur.ctx } else { 0 }
+        $newCtx = if ($e.ctx) { [int64]$e.ctx } else { 0 }
+        if ($newCtx -gt $curCtx) { $bestById[$e.id] = $e }
     }
+    $unique = $bestById.Values
     return ,($unique | Sort-Object @{e={Get-ModelRank $_.id}}, id)
 }
 
@@ -324,19 +334,18 @@ function Invoke-ModelPicker {
 # catalog file sets BOTH context_window and max_context_window directly, so the
 # 1M lands un-clamped. The catalog is also the persistent source codex's
 # auto-compact trigger reads each turn, so the window survives compaction.
+# We still pass matching `model_context_window`,
+# `model_auto_compact_token_limit`, and `model_auto_compact_token_limit_scope`
+# startup overrides below, because Codex's session config path is the final
+# source for the BodyAfterPrefix compaction scope.
 #
 # Source: `codex debug models` (codex's own ModelsResponse), NOT a hand-written
 # file or a download. codex emits every field correctly — including the
 # mandatory ~21KB base_instructions per model — and it tracks the installed
 # codex version automatically.
 #
-# auto_compact_token_limit MUST be patched too. Leaving it null does NOT make
-# codex derive it from the patched context_window -- verified on 0.140.0, a
-# null limit makes codex fall back to the model's *native* window (gpt-5.5 =
-# 272K), so auto-compaction fires at ~217K (its internal ~80% trigger) even
-# though /status correctly shows the patched 1M. We set it explicitly to 90%
-# of the patched window (codex clamps any higher value to 90% anyway) so the
-# compaction trigger tracks the real window instead of the bundled 272K.
+# auto_compact_token_limit is patched too so both Codex's model metadata and
+# session config paths agree on the same trigger.
 function Write-CodexCatalog($models) {
     $catalogPath = Join-Path $codexHome 'catalog.json'
     try {
@@ -350,8 +359,6 @@ function Write-CodexCatalog($models) {
                 $ctx = [int64]$hit.ctx
                 $m.context_window     = $ctx
                 $m.max_context_window = $ctx
-                # Without this, codex compacts at ~80% of the model's *native*
-                # window, not the patched one. 0.9 == codex's own clamp ceiling.
                 # Add-Member -Force, not `$m.x = `: the field deserializes from
                 # JSON null and direct assignment throws "property cannot be
                 # found", which would sink the whole catalog into the catch.
@@ -370,8 +377,33 @@ function Write-CodexCatalog($models) {
     }
 }
 
+function Set-CodexTomlOverrides($catalogPath) {
+    $cfgPath = Join-Path $codexHome 'config.toml'
+    if (-not (Test-Path $cfgPath)) { return }
+    $catalogToml = ($catalogPath -replace '\\', '/')
+    $managed = @(
+        ('model_catalog_json = "{0}"' -f $catalogToml),
+        'model_auto_compact_token_limit_scope = "body_after_prefix"'
+    ) -join "`r`n"
+
+    $raw = Get-Content $cfgPath -Raw
+    $raw = [Regex]::Replace($raw, '(?m)^\s*model_catalog_json\s*=.*\r?\n?', '')
+    $raw = [Regex]::Replace($raw, '(?m)^\s*model_auto_compact_token_limit_scope\s*=.*\r?\n?', '')
+    $sectionIdx = $raw.IndexOf("`n[")
+    if ($sectionIdx -lt 0) {
+        $updated = $raw.TrimEnd() + "`r`n" + $managed + "`r`n"
+    } else {
+        $head = $raw.Substring(0, $sectionIdx).TrimEnd()
+        $tail = $raw.Substring($sectionIdx)
+        $updated = $head + "`r`n" + $managed + $tail
+    }
+    if ($updated -ne $raw) {
+        [System.IO.File]::WriteAllText($cfgPath, $updated, (New-Object System.Text.UTF8Encoding $false))
+    }
+}
+
 # ---------- codex exec ----------
-function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
+function Invoke-CodexWithModel($mainModel, $cfg, $passthrough, $stdinInput) {
     if (-not (Test-Path (Join-Path $codexHome 'config.toml'))) {
         Write-Error "[cxp] $codexHome\config.toml not found. Re-run the gc2cc installer."
         return
@@ -390,11 +422,10 @@ function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
     if ($eff) {
         $codexArgs += @("-c", "model_reasoning_effort=`"$eff`"")
     }
-    # Codex clamps `-c model_context_window=N` to the bundled max (272K for
-    # gpt-5.5), so that override can NEVER deliver the proxy's 1M window. The
-    # only un-clamped path is a model catalog file, which sets context_window
-    # AND max_context_window directly. Generate one from the real /v1/models
-    # limits and point codex at it via `model_catalog_json`.
+    # Codex clamps `-c model_context_window=N` to the model's max_context_window.
+    # The catalog raises that max to the proxy's real /v1/models limit; after
+    # that, matching config overrides keep the live session's context window and
+    # auto-compact threshold aligned with the patched metadata.
     # NB: assign to $models first. Get-AvailableModels returns a comma-wrapped
     # array (`,(...)`); piping it straight into Where-Object passes the whole
     # array as a single $_, so $meta.ctx member-enumerates into an Object[].
@@ -402,18 +433,35 @@ function Invoke-CodexWithModel($mainModel, $cfg, $passthrough) {
     $meta = $models | Where-Object { $_.id -eq $mainModel } | Select-Object -First 1
     $catalogPath = Write-CodexCatalog $models
     if ($catalogPath) {
+        Set-CodexTomlOverrides $catalogPath
         # TOML parses the `-c` value; a Windows '\' path triggers invalid escape
         # errors (\U, \g ...). Forward slashes are accepted by Rust on Windows
         # and need no escaping in TOML.
         $catalogToml = ($catalogPath -replace '\\', '/')
         $codexArgs += @("-c", "model_catalog_json=`"$catalogToml`"")
     }
+    $autoCompactLimit = $null
+    if ($meta.ctx) {
+        $ctx = [int64]$meta.ctx
+        $autoCompactLimit = [int64][math]::Floor($ctx * 0.9)
+        $codexArgs += @("-c", "model_context_window=$ctx")
+        $codexArgs += @("-c", "model_auto_compact_token_limit=$autoCompactLimit")
+        # Codex 0.141.0 defaults this to `total`, whose pre-turn compact path
+        # only reads model metadata. `body_after_prefix` reads the explicit
+        # config limit first and separately guards the full effective window.
+        $codexArgs += @("-c", "model_auto_compact_token_limit_scope=`"body_after_prefix`"")
+    }
     if ($meta.maxOut) { $codexArgs += @("-c", "model_max_output_tokens=$($meta.maxOut)") }
     $effNote = if ($eff) { $eff } else { '(codex default)' }
     $ctxNote = if ($meta.ctx) { '{0}K' -f [int]($meta.ctx / 1000) } else { '?' }
+    $compactNote = if ($autoCompactLimit) { '{0}K' -f [int]($autoCompactLimit / 1000) } else { '?' }
     $catNote = if ($catalogPath) { 'catalog' } else { 'bundled(272K cap)' }
-    Write-Host ('[cxp] model={0}  effort={1}  ctx={2}  via={3}  CODEX_HOME={4}' -f $mainModel, $effNote, $ctxNote, $catNote, $codexHome) -ForegroundColor Cyan
-    & codex @codexArgs @passthrough
+    Write-Host ('[cxp] model={0}  effort={1}  ctx={2}  autoCompactAt={3}  compactScope=body_after_prefix  via={4}  CODEX_HOME={5}' -f $mainModel, $effNote, $ctxNote, $compactNote, $catNote, $codexHome) -ForegroundColor Cyan
+    if ($null -ne $stdinInput) {
+        $stdinInput | & codex @codexArgs @passthrough
+    } else {
+        & codex @codexArgs @passthrough
+    }
 }
 
 # ---------- dispatch ----------
@@ -475,4 +523,4 @@ if (-not $main) {
     if (-not $main) { return }
 }
 
-Invoke-CodexWithModel -mainModel $main -cfg $config -passthrough $passthrough
+Invoke-CodexWithModel -mainModel $main -cfg $config -passthrough $passthrough -stdinInput $script:cxpPipelineInput

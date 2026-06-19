@@ -70,7 +70,7 @@ cxp config                            # interactive: pick default model
 cxp --help                            # show cxp usage + current settings
 ```
 
-`cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`).
+`cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`). On launch it patches Codex's model catalog from the proxy's `/v1/models` limits and prints `ctx` plus `autoCompactAt`; for 1M-capable GPT models you should see about `ctx=1050K autoCompactAt=945K`, not the bundled ~272K window.
 
 ### First-run wizard
 

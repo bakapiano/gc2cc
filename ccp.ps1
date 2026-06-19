@@ -22,6 +22,7 @@
 $base       = 'http://localhost:4141'
 $pagesBase  = 'https://bakapiano.github.io/gc2cc'
 $configPath = Join-Path $HOME '.local\share\gc2cc\ccp.json'
+$script:ccpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else { $null }
 # The proxy (copilot-api) reads reasoning effort from ITS OWN config here, keyed
 # by bare model id. The NSSM service runs as LocalSystem but install.ps1 pins
 # HOME/USERPROFILE to this user, so os.homedir() resolves to $HOME -- we can
@@ -460,7 +461,7 @@ function Invoke-ModelPicker {
 }
 
 # ---------- claude exec ----------
-function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
+function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough, $stdinInput) {
     # Normalize the requested model against the live catalog by *bare* id, so a
     # stored default or `-Model` value like `claude-opus-4-8` adopts the proxy's
     # canonical surfaced id `claude-opus-4-8[1m]`. That `[1m]` marker is the only
@@ -516,9 +517,17 @@ function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough) {
     $bypassNote = if ($cfg.bypassPermissions) { 'on' } else { 'off' }
     Write-Host ('[ccp] main={0}  small={1}  effort={2}  bypass={3}  autoCompactAt={4}' -f $mainModel, $small, $effortNote, $bypassNote, $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW) -ForegroundColor Cyan
     if ($cfg.bypassPermissions) {
-        & claude @passthrough --dangerously-skip-permissions
+        if ($null -ne $stdinInput) {
+            $stdinInput | & claude @passthrough --dangerously-skip-permissions
+        } else {
+            & claude @passthrough --dangerously-skip-permissions
+        }
     } else {
-        & claude @passthrough
+        if ($null -ne $stdinInput) {
+            $stdinInput | & claude @passthrough
+        } else {
+            & claude @passthrough
+        }
     }
 }
 
@@ -594,4 +603,4 @@ if (-not $main) {
     if (-not $main) { return }
 }
 
-Invoke-ClaudeWithModel -mainModel $main -cfg $config -passthrough $passthrough
+Invoke-ClaudeWithModel -mainModel $main -cfg $config -passthrough $passthrough -stdinInput $script:ccpPipelineInput
