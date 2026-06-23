@@ -309,6 +309,8 @@ Usage:
                                        toggle --dangerously-skip-permissions.
   ccp upgrade                          Re-run the gc2cc one-liner installer
                                        (will trigger UAC).
+  ccp ccsm                             Register ccp as a launchable CLI in
+                                       ccsm (~/.ccsm/config.json).
   ccp --help                           Show this help.
 
 Config file: $configPath
@@ -436,6 +438,84 @@ function Invoke-CcpUpgrade {
     } catch {}
 }
 
+# ---------- ccsm integration ----------
+# Register this wrapper (ccp.cmd) as a CLI in ccsm's config.json so ccsm's
+# Launch page can spawn it directly. ccsm already knows how to run a .cmd via
+# its shell:'direct' strategy (cmd.exe /d /s /c <path>), and uses the `type`
+# field (claude/codex) to pick the matching resume templates. We write straight
+# into ~/.ccsm/config.json (CCSM_HOME honoured), keyed by id so re-running just
+# updates in place and preserves every other key (builtins, user settings).
+function Invoke-CcpCcsmSetup {
+    $ccsmHome = if ($env:CCSM_HOME) { $env:CCSM_HOME } else { Join-Path $HOME '.ccsm' }
+    $ccsmCfg  = Join-Path $ccsmHome 'config.json'
+
+    # The .cmd shim sits next to this script (the gc2cc bin dir). Prefer the
+    # script's own dir; fall back to the canonical install location.
+    $cmdPath = Join-Path $PSScriptRoot 'ccp.cmd'
+    if (-not (Test-Path $cmdPath)) {
+        $cmdPath = Join-Path $env:LOCALAPPDATA 'gc2cc\bin\ccp.cmd'
+    }
+    if (-not (Test-Path $cmdPath)) {
+        Write-Warning "[ccp] ccp.cmd not found (looked in $PSScriptRoot and %LOCALAPPDATA%\gc2cc\bin). Registering the path anyway: $cmdPath"
+    }
+
+    # shell='direct': ccsm's resolveCommand sees the .cmd extension and runs it
+    # via cmd.exe /d /s /c, appending resume args after. type='claude' selects
+    # Claude-style resume templates (--continue / --resume).
+    $entry = [pscustomobject][ordered]@{
+        id               = 'ccp'
+        name             = 'ccp (gc2cc Claude)'
+        command          = $cmdPath
+        args             = @()
+        resumeLatestArgs = @('--continue')
+        resumePickerArgs = @('--resume')
+        shell            = 'direct'
+        type             = 'claude'
+    }
+
+    # Load existing ccsm config (preserve every other key) or start fresh.
+    if (Test-Path $ccsmCfg) {
+        try {
+            $cfg = Get-Content $ccsmCfg -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            Write-Error "[ccp] $ccsmCfg is invalid JSON; refusing to overwrite. Fix or remove it, then re-run 'ccp ccsm'."
+            return
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $ccsmHome | Out-Null
+        $cfg = [pscustomobject]@{}
+    }
+
+    # Drop any prior 'ccp' entry, append ours. @(...) keeps clis an array even
+    # when it collapses to a single element.
+    $existing = @()
+    if (($cfg.PSObject.Properties.Name -contains 'clis') -and $cfg.clis) {
+        $existing = @($cfg.clis | Where-Object { $_.id -ne 'ccp' })
+    }
+    $clis = @($existing + $entry)
+    if ($cfg.PSObject.Properties.Name -contains 'clis') {
+        $cfg.clis = $clis
+    } else {
+        $cfg | Add-Member -NotePropertyName 'clis' -NotePropertyValue $clis
+    }
+
+    try {
+        $json = $cfg | ConvertTo-Json -Depth 50
+        [System.IO.File]::WriteAllText($ccsmCfg, $json, (New-Object System.Text.UTF8Encoding $false))
+    } catch {
+        Write-Error "[ccp] failed to write ${ccsmCfg}: $_"
+        return
+    }
+
+    Write-Host ''
+    Write-Host "[ccp] Registered 'ccp' as a ccsm CLI." -ForegroundColor Green
+    Write-Host ('  config : {0}' -f $ccsmCfg)
+    Write-Host ('  command: {0}' -f $cmdPath)
+    Write-Host  '  type   : claude (resume: --continue / --resume)'
+    Write-Host ''
+    Write-Host "[ccp] ccsm caches config in memory -- restart ccsm to see it on the Launch page." -ForegroundColor Yellow
+}
+
 # ---------- model picker ----------
 function Invoke-ModelPicker {
     $models = Get-AvailableModels
@@ -544,6 +624,7 @@ if ($args.Count -gt 0) {
         'help'    { Show-Help;        return }
         'config'  { Invoke-CcpConfig; return }
         'upgrade' { Invoke-CcpUpgrade; return }
+        'ccsm'    { Invoke-CcpCcsmSetup; return }
     }
 }
 

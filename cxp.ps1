@@ -197,6 +197,8 @@ Usage:
   cxp [-Model <id>] [codex args...]    Launch codex. -Model skips the picker.
   cxp config                           Interactive: pick default model.
   cxp upgrade                          Re-run the gc2cc one-liner installer.
+  cxp ccsm                             Register cxp as a launchable CLI in
+                                       ccsm (~/.ccsm/config.json).
   cxp --help                           Show this help.
 
 Isolated CODEX_HOME: $codexHome
@@ -300,6 +302,84 @@ function Invoke-CxpUpgrade {
         $cfg.updateAvailable = $false
         Save-CxpConfig $cfg
     } catch {}
+}
+
+# ---------- ccsm integration ----------
+# Register this wrapper (cxp.cmd) as a CLI in ccsm's config.json so ccsm's
+# Launch page can spawn it directly. ccsm runs a .cmd via its shell:'direct'
+# strategy (cmd.exe /d /s /c <path>), and uses the `type` field to pick the
+# matching resume templates. We write straight into ~/.ccsm/config.json
+# (CCSM_HOME honoured), keyed by id so re-running updates in place and preserves
+# every other key (builtins, user settings).
+function Invoke-CxpCcsmSetup {
+    $ccsmHome = if ($env:CCSM_HOME) { $env:CCSM_HOME } else { Join-Path $HOME '.ccsm' }
+    $ccsmCfg  = Join-Path $ccsmHome 'config.json'
+
+    # The .cmd shim sits next to this script (the gc2cc bin dir). Prefer the
+    # script's own dir; fall back to the canonical install location.
+    $cmdPath = Join-Path $PSScriptRoot 'cxp.cmd'
+    if (-not (Test-Path $cmdPath)) {
+        $cmdPath = Join-Path $env:LOCALAPPDATA 'gc2cc\bin\cxp.cmd'
+    }
+    if (-not (Test-Path $cmdPath)) {
+        Write-Warning "[cxp] cxp.cmd not found (looked in $PSScriptRoot and %LOCALAPPDATA%\gc2cc\bin). Registering the path anyway: $cmdPath"
+    }
+
+    # shell='direct': ccsm's resolveCommand sees the .cmd extension and runs it
+    # via cmd.exe /d /s /c, appending resume args after. type='codex' selects
+    # Codex-style resume templates (resume --last / resume).
+    $entry = [pscustomobject][ordered]@{
+        id               = 'cxp'
+        name             = 'cxp (gc2cc Codex)'
+        command          = $cmdPath
+        args             = @()
+        resumeLatestArgs = @('resume', '--last')
+        resumePickerArgs = @('resume')
+        shell            = 'direct'
+        type             = 'codex'
+    }
+
+    # Load existing ccsm config (preserve every other key) or start fresh.
+    if (Test-Path $ccsmCfg) {
+        try {
+            $cfg = Get-Content $ccsmCfg -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            Write-Error "[cxp] $ccsmCfg is invalid JSON; refusing to overwrite. Fix or remove it, then re-run 'cxp ccsm'."
+            return
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $ccsmHome | Out-Null
+        $cfg = [pscustomobject]@{}
+    }
+
+    # Drop any prior 'cxp' entry, append ours. @(...) keeps clis an array even
+    # when it collapses to a single element.
+    $existing = @()
+    if (($cfg.PSObject.Properties.Name -contains 'clis') -and $cfg.clis) {
+        $existing = @($cfg.clis | Where-Object { $_.id -ne 'cxp' })
+    }
+    $clis = @($existing + $entry)
+    if ($cfg.PSObject.Properties.Name -contains 'clis') {
+        $cfg.clis = $clis
+    } else {
+        $cfg | Add-Member -NotePropertyName 'clis' -NotePropertyValue $clis
+    }
+
+    try {
+        $json = $cfg | ConvertTo-Json -Depth 50
+        [System.IO.File]::WriteAllText($ccsmCfg, $json, (New-Object System.Text.UTF8Encoding $false))
+    } catch {
+        Write-Error "[cxp] failed to write ${ccsmCfg}: $_"
+        return
+    }
+
+    Write-Host ''
+    Write-Host "[cxp] Registered 'cxp' as a ccsm CLI." -ForegroundColor Green
+    Write-Host ('  config : {0}' -f $ccsmCfg)
+    Write-Host ('  command: {0}' -f $cmdPath)
+    Write-Host  '  type   : codex (resume: resume --last / resume)'
+    Write-Host ''
+    Write-Host "[cxp] ccsm caches config in memory -- restart ccsm to see it on the Launch page." -ForegroundColor Yellow
 }
 
 # ---------- model picker ----------
@@ -473,6 +553,7 @@ if ($args.Count -gt 0) {
         'help'    { Show-Help;        return }
         'config'  { Invoke-CxpConfig; return }
         'upgrade' { Invoke-CxpUpgrade; return }
+        'ccsm'    { Invoke-CxpCcsmSetup; return }
     }
 }
 
