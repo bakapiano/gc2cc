@@ -276,25 +276,37 @@ $NpmCache  = Join-Path $NpmRoot 'cache'
 New-Item -ItemType Directory -Force -Path $NpmGlobal, $NpmCache | Out-Null
 
 Info "Installing $NpmPackage into $NpmGlobal ..."
-# --prefix scopes the global install to our directory. Suppress fund/audit
-# noise; -s would also suppress real errors so we keep them.
+# --prefix scopes the global install to our directory. --no-fund/--no-audit
+# drop the well-known noise; -s would ALSO swallow the real failure reason, so
+# we never use it.
 #
 # npm writes warnings (unknown config keys, deprecations) to stderr. PS 5.1
 # with ErrorActionPreference=Stop promotes that stderr write to a terminating
 # NativeCommandError that kills the install before we can check $LASTEXITCODE.
 # Locally relax to Continue and rely on the exit code for the real verdict.
+#
+# Capture the merged stdout+stderr (don't pipe to Out-Null -- that's what made
+# past failures undiagnosable: install.log/the transcript showed only "exit=1").
+# Persist the full output to npm-install.log, and on failure echo it to the
+# console so the trap-held elevated window shows the actual npm error.
+$npmLog = Join-Path $LogDir 'npm-install.log'
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
-    & npm install -g $NpmPackage `
+    $npmOutput = & npm install -g $NpmPackage `
         --prefix $NpmGlobal `
         --cache $NpmCache `
-        --no-fund --no-audit 2>&1 | Out-Null
+        --no-fund --no-audit 2>&1
+    $npmExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $prev
 }
-if ($LASTEXITCODE -ne 0) {
-    Die "npm install $NpmPackage failed (exit=$LASTEXITCODE). See $installTranscript."
+$npmOutput | Out-String | Set-Content -Path $npmLog -Encoding UTF8
+if ($npmExit -ne 0) {
+    Write-Host '---- npm install output ----' -ForegroundColor DarkGray
+    $npmOutput | ForEach-Object { Write-Host $_ }
+    Write-Host '----------------------------' -ForegroundColor DarkGray
+    Die "npm install $NpmPackage failed (exit=$npmExit). Full npm output: $npmLog"
 }
 
 # The .cmd shim Windows uses; this is what NSSM ultimately exec's via node.exe
@@ -482,15 +494,18 @@ function Install-NpmCli {
         return
     }
     Info "Installing $Pkg globally (prefix=$npmPrefixUser)..."
+    $cliLog = Join-Path $LogDir "npm-$BinName.log"
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & npm --prefix $npmPrefixUser install -g $Pkg 2>&1 | Out-Null
+        $cliOut = & npm --prefix $npmPrefixUser install -g $Pkg 2>&1
     } finally {
         $ErrorActionPreference = $prev
     }
+    $cliOut | Out-String | Set-Content -Path $cliLog -Encoding UTF8
     if (-not (Test-Path (Join-Path $npmPrefixUser "$BinName.cmd"))) {
-        Warn "npm install $Pkg reported success but $BinName.cmd not found. Restart your shell."
+        $cliOut | ForEach-Object { Write-Host $_ }
+        Warn "npm install $Pkg did not produce $BinName.cmd (exit=$LASTEXITCODE). Full output: $cliLog. Restart your shell if it actually installed."
     } else {
         Ok "$BinName installed: $npmPrefixUser\$BinName.cmd"
     }
