@@ -526,16 +526,61 @@ if ($WantCcp -and -not $SkipClaudeCode) {
 # so the user's ~/.codex/config.toml (if any) is never read or written by cxp.
 # The provider definition points at the local copilot-api proxy with the
 # Responses wire API (the only one codex supports as of 2025+).
+#
+# Upgrade-safe: the full template is written only on first install. On every
+# subsequent run (incl. `cxp upgrade`) we PRESERVE the existing config.toml and
+# only refresh the gc2cc-managed provider wiring in place, so hand-added keys --
+# [tui] status_line, [windows] sandbox, [projects.*] trust, custom
+# approval_policy, etc. -- survive across upgrades.
+function Update-CodexManagedConfig {
+    param([string]$Path, [int]$Port)
+    $raw = Get-Content $Path -Raw
+
+    # Ensure the provider is selected. Only add if absent -- never override a
+    # value the user deliberately changed.
+    if ($raw -notmatch '(?m)^\s*model_provider\s*=') {
+        $raw = "model_provider = `"gc2cc`"`r`n" + $raw
+    }
+
+    # Refresh (or insert) the [model_providers.gc2cc] table so base_url's port
+    # and the wire settings always match this install. The match runs from the
+    # table header to the next top-level [section] or EOF; user-named provider
+    # tables and every other section are left untouched.
+    $block = @"
+[model_providers.gc2cc]
+name = "gc2cc copilot-api"
+base_url = "http://localhost:$Port/v1"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = false
+"@
+    $tablePattern = '(?ms)^\[model_providers\.gc2cc\].*?(?=^\[|\z)'
+    if ($raw -match $tablePattern) {
+        $raw = [Regex]::Replace($raw, $tablePattern, ($block + "`r`n`r`n"))
+    } else {
+        $raw = $raw.TrimEnd() + "`r`n`r`n" + $block + "`r`n"
+    }
+
+    [System.IO.File]::WriteAllText($Path, $raw.TrimEnd() + "`r`n", (New-Object System.Text.UTF8Encoding $false))
+}
+
 if ($WantCxp) {
     Install-NpmCli -Pkg '@openai/codex' -BinName 'codex'
 
     $CodexHome = Join-Path $InstallDir 'codex-home'
     New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
     $codexCfgPath = Join-Path $CodexHome 'config.toml'
+    # First-run template. Written verbatim only when no config.toml exists yet;
+    # an existing file is preserved and patched in place (see above).
     $codexCfg = @"
-# gc2cc-managed Codex config -- DO NOT EDIT BY HAND.
+# gc2cc-managed Codex config.
 # Activated only when CODEX_HOME points at this directory (set by cxp.ps1).
 # Your own ~/.codex/config.toml is unaffected.
+#
+# Upgrade-safe: gc2cc only rewrites the [model_providers.gc2cc] table and (if
+# missing) the model_provider line. Any other keys you add here -- [tui]
+# status_line, [windows] sandbox, [projects.*] trust, approval_policy, etc. --
+# are preserved across `cxp upgrade`.
 
 model_provider = "gc2cc"
 model = "gpt-5.5"
@@ -543,7 +588,7 @@ model = "gpt-5.5"
 # model_auto_compact_token_limit, while still guarding the full effective window.
 model_auto_compact_token_limit_scope = "body_after_prefix"
 # Quiet sandbox defaults so codex runs interactively without prompting on every
-# tool call. Adjust via `cxp` flags or by editing this file if you regenerate.
+# tool call. Adjust via `cxp` flags or by editing this file -- your edits stick.
 approval_policy = "on-failure"
 
 [model_providers.gc2cc]
@@ -553,8 +598,13 @@ wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 requires_openai_auth = false
 "@
-    Set-Content -Path $codexCfgPath -Value $codexCfg -Encoding UTF8
-    Ok "codex config written: $codexCfgPath"
+    if (-not (Test-Path $codexCfgPath)) {
+        Set-Content -Path $codexCfgPath -Value $codexCfg -Encoding UTF8
+        Ok "codex config written: $codexCfgPath"
+    } else {
+        Update-CodexManagedConfig -Path $codexCfgPath -Port $Port
+        Ok "codex config preserved; managed provider keys refreshed: $codexCfgPath"
+    }
 }
 
 # ---------- 9. ccp / cxp wrappers on PATH ----------
