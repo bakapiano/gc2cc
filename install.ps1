@@ -45,7 +45,11 @@ param(
     # '' due to PS type coercion, so `$null -eq $InstallClis` never triggers
     # and the menu would be skipped on `irm | iex` (no positional args).
     [string] $InstallClis    = '__ASK__',
-    [switch] $NonInteractive
+    [switch] $NonInteractive,
+    # Internal: set by the UAC self-relaunch so the elevated child knows to hold
+    # its window open on error (otherwise the thrown error flashes by unseen as
+    # the fresh elevated console closes the instant the script ends).
+    [switch] $Elevated
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +84,28 @@ function Ensure-Cmd {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         Die "$Name still not on PATH after install. Open a fresh PowerShell and re-run."
     }
+}
+
+# ---------- error trap: keep the elevated window open ----------
+# When relaunched via UAC (-Elevated), the child runs in a *fresh* console that
+# closes the instant the script returns -- so a thrown error (Die / any Stop)
+# flashes by before it can be read. Trap terminating errors at script scope and,
+# in the elevated child, hold the window open until the user acknowledges. The
+# non-elevated parent (and `irm | iex` / CI runs) just print and exit as before.
+trap {
+    Write-Host ''
+    Write-Host "[gc2cc] INSTALL FAILED: $_" -ForegroundColor Red
+    if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+        Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray
+    }
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+    if ($Elevated) {
+        Write-Host ''
+        Write-Host '[gc2cc] The install above failed. Logs: ' -NoNewline -ForegroundColor Yellow
+        Write-Host (Join-Path $InstallDir 'logs\install.log') -ForegroundColor Yellow
+        Read-Host '[gc2cc] Press Enter to close this window'
+    }
+    break
 }
 
 # ---------- 0. self-elevate ----------
@@ -153,6 +179,8 @@ if (-not $isAdmin) {
     if ($SkipPath)       { $argList += '-SkipPath' }
     if ($NonInteractive) { $argList += '-NonInteractive' }
     $argList += @('-InstallClis', "`"$InstallClis`"")
+    # Mark the child so its trap holds the window open on error (see top of file).
+    $argList += '-Elevated'
     Start-Process powershell -ArgumentList $argList -Verb RunAs -Wait
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     return
@@ -340,6 +368,41 @@ foreach ($legacy in @(
         Info "Removing legacy artifact: $legacy"
         Remove-Item -Recurse -Force $legacy -ErrorAction SilentlyContinue
     }
+}
+
+# ---------- 6c. disable proxy-side Responses-API auto-compaction ----------
+# copilot-api injects `context_management:[{type:compaction, compact_threshold}]`
+# into every upstream /v1/responses request. For gpt-5.5 the default threshold is
+# 272000*0.8 = 217600, so the *server* compacts the conversation at ~217K tokens
+# regardless of the 1M window cxp advertises to Codex. That server-driven
+# compaction arrives as a `Compaction` stream item the client just applies, so
+# it is invisible to Codex's own auto-compact limits and cannot be tuned from the
+# cxp side. The only lever is the proxy's own switch: gating reads
+# `useResponsesApiContextManagement ?? true`, so setting it false stops the
+# injection entirely. ccp/cxp already own compaction client-side
+# (model_auto_compact_token_limit), so disabling the proxy layer is safe and is
+# what actually delivers the full advertised context window.
+$copilotCfgPath = Join-Path $UserHome '.local\share\copilot-api\config.json'
+try {
+    if (Test-Path $copilotCfgPath) {
+        $cfgObj = Get-Content $copilotCfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path $copilotCfgPath) | Out-Null
+        $cfgObj = [pscustomobject]@{}
+    }
+    # PSCustomObject from ConvertFrom-Json: assign if present, Add-Member if not
+    # (direct assignment to a missing property is a no-op on PS5.1).
+    if ($cfgObj.PSObject.Properties.Name -contains 'useResponsesApiContextManagement') {
+        $cfgObj.useResponsesApiContextManagement = $false
+    } else {
+        $cfgObj | Add-Member -MemberType NoteProperty -Name 'useResponsesApiContextManagement' -Value $false
+    }
+    $cfgJson = $cfgObj | ConvertTo-Json -Depth 50
+    # UTF-8 *without* BOM -- Node's JSON.parse chokes on a leading BOM.
+    [System.IO.File]::WriteAllText($copilotCfgPath, $cfgJson, (New-Object System.Text.UTF8Encoding $false))
+    Ok "proxy auto-compaction disabled (useResponsesApiContextManagement=false): $copilotCfgPath"
+} catch {
+    Warn "Could not patch $copilotCfgPath to disable proxy compaction: $_"
 }
 
 # ---------- 7. NSSM service ----------
