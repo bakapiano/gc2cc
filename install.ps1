@@ -293,7 +293,12 @@ $npmLog = Join-Path $LogDir 'npm-install.log'
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
-    $npmOutput = & npm install -g $NpmPackage `
+    # Invoke npm.cmd, NOT bare `npm`. Under the PS call operator `& npm` resolves
+    # to the npm.ps1 shim, whose arg-parsing is broken on recent npm (10.9.3 /
+    # Node 22.18.0): `& npm install` is mangled into subcommand "pm" -> npm dies
+    # with `Unknown command: "pm"`. The .cmd shim bypasses npm.ps1 entirely.
+    # See npm/cli#8528.
+    $npmOutput = & npm.cmd install -g $NpmPackage `
         --prefix $NpmGlobal `
         --cache $NpmCache `
         --no-fund --no-audit 2>&1
@@ -498,7 +503,8 @@ function Install-NpmCli {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $cliOut = & npm --prefix $npmPrefixUser install -g $Pkg 2>&1
+        # npm.cmd, not bare npm -- see npm/cli#8528 note above.
+        $cliOut = & npm.cmd --prefix $npmPrefixUser install -g $Pkg 2>&1
     } finally {
         $ErrorActionPreference = $prev
     }
