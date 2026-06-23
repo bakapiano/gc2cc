@@ -594,6 +594,33 @@ function Invoke-ClaudeWithModel($mainModel, $cfg, $passthrough, $stdinInput) {
     }
     $effortNote = if ($effort) { $effort } else { '(proxy default)' }
 
+    # --settings with INLINE JSON survives every forwarding hop (cmd -> batch %*
+    # -> powershell -File) intact, but dies on the *last* hop: PowerShell 5.1's
+    # native-command argument passing strips the embedded double quotes when it
+    # builds claude's real command line, so claude sees `{theme:auto}` and aborts
+    # with "Invalid JSON provided to --settings". This bites when ccsm launches
+    # ccp and injects `--settings {"theme":"auto"}`. A file PATH has no quotes to
+    # mangle, and claude's `--settings <file-or-json>` accepts a path -- so spill
+    # any inline-JSON value to a temp file and pass that instead. (`--settings=`
+    # joined form and already-a-path values are left untouched.)
+    for ($pi = 0; $pi -lt $passthrough.Count; $pi++) {
+        $tok = [string]$passthrough[$pi]
+        $val = $null; $valIdx = -1
+        if ($tok -eq '--settings' -and ($pi + 1) -lt $passthrough.Count) {
+            $val = [string]$passthrough[$pi + 1]; $valIdx = $pi + 1
+        } elseif ($tok -like '--settings=*') {
+            $val = $tok.Substring('--settings='.Length); $valIdx = $pi
+        }
+        if ($null -ne $val -and $val.TrimStart().StartsWith('{')) {
+            try {
+                $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("ccp-settings-$PID.json")
+                [System.IO.File]::WriteAllText($tmp, $val, (New-Object System.Text.UTF8Encoding $false))
+                if ($valIdx -eq $pi) { $passthrough[$pi] = "--settings=$tmp" }
+                else { $passthrough[$valIdx] = $tmp }
+            } catch {}
+        }
+    }
+
     $bypassNote = if ($cfg.bypassPermissions) { 'on' } else { 'off' }
     Write-Host ('[ccp] main={0}  small={1}  effort={2}  bypass={3}  autoCompactAt={4}' -f $mainModel, $small, $effortNote, $bypassNote, $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW) -ForegroundColor Cyan
     if ($cfg.bypassPermissions) {
