@@ -429,8 +429,44 @@ function Invoke-ModelPicker {
 function Write-CodexCatalog($models) {
     $catalogPath = Join-Path $codexHome 'catalog.json'
     try {
-        $raw = & codex debug models 2>$null | Out-String
+        # Generate the bundled model list from a THROWAWAY CODEX_HOME that has no
+        # model_catalog_json. codex 0.142+ loads model_catalog_json even for
+        # `debug models`, so running it against our real $codexHome makes codex
+        # merge the existing catalog's base_instructions back into its output;
+        # cxp then writes that back and EACH run doubles base_instructions
+        # (21KB -> ~21MB after ~10 runs -> a 1.5GB catalog that OOMs codex on
+        # load: "Error loading configuration: out of memory"). A clean temp home
+        # breaks the feedback loop -- codex always reports its pristine bundled
+        # models, never our patched catalog.
+        $tmpHome = Join-Path ([System.IO.Path]::GetTempPath()) ('cxp-cat-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $tmpHome | Out-Null
+        $minimalCfg = @"
+model_provider = "gc2cc"
+model = "gpt-5.5"
+[model_providers.gc2cc]
+name = "gc2cc copilot-api"
+base_url = "$base/v1"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = false
+"@
+        [System.IO.File]::WriteAllText((Join-Path $tmpHome 'config.toml'), $minimalCfg, (New-Object System.Text.UTF8Encoding $false))
+        $savedHome = $env:CODEX_HOME
+        $env:CODEX_HOME = $tmpHome
+        try {
+            $raw = & codex debug models 2>$null | Out-String
+        } finally {
+            $env:CODEX_HOME = $savedHome
+            Remove-Item -Recurse -Force $tmpHome -ErrorAction SilentlyContinue
+        }
         if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+        # Sanity cap: a healthy `codex debug models` is ~200KB. If it is wildly
+        # larger, the feedback loop somehow re-armed -- refuse to write rather
+        # than persist a multi-MB catalog that bricks codex.
+        if ($raw.Length -gt 5MB) {
+            Write-Warning "[cxp] codex debug models returned $([int]($raw.Length/1MB))MB (expected ~0.2MB); skipping catalog to avoid OOM loop."
+            return $null
+        }
         $cat = $raw | ConvertFrom-Json
         if (-not $cat.models) { return $null }
         foreach ($m in $cat.models) {
@@ -519,6 +555,17 @@ function Invoke-CodexWithModel($mainModel, $cfg, $passthrough, $stdinInput) {
         # and need no escaping in TOML.
         $catalogToml = ($catalogPath -replace '\\', '/')
         $codexArgs += @("-c", "model_catalog_json=`"$catalogToml`"")
+    } else {
+        # No catalog this run: strip any stale model_catalog_json line so codex
+        # doesn't abort with "cannot find the file" / OOM on a leftover path.
+        $cfgPath = Join-Path $codexHome 'config.toml'
+        if (Test-Path $cfgPath) {
+            $rawCfg = Get-Content $cfgPath -Raw
+            $stripped = [Regex]::Replace($rawCfg, '(?m)^\s*model_catalog_json\s*=.*\r?\n?', '')
+            if ($stripped -ne $rawCfg) {
+                [System.IO.File]::WriteAllText($cfgPath, $stripped, (New-Object System.Text.UTF8Encoding $false))
+            }
+        }
     }
     $autoCompactLimit = $null
     if ($meta.ctx) {
