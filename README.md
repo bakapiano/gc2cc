@@ -29,7 +29,7 @@ The installer will:
 1. Self-elevate via UAC if needed (re-fetches `install.ps1` into `%TEMP%` and relaunches `-Verb RunAs`).
 2. Install missing prereqs (`node`, `winget`) — `git` and `bun` are no longer required.
 3. Download `nssm.exe` from our GitHub Release mirror into `%LOCALAPPDATA%\gc2cc\bin\` (with `nssm.cc` as fallback).
-4. `npm install -g @jeffreycao/copilot-api@latest` into a private prefix at `%LOCALAPPDATA%\gc2cc\npm\global\` (so the LocalSystem service has a stable path independent of the user's npm prefix).
+4. `npm install -g @jeffreycao/copilot-api@1.13.2` into a private prefix at `%LOCALAPPDATA%\gc2cc\npm\global\` (so the LocalSystem service has a stable path independent of the user's npm prefix).
 5. Prompt you once for **GitHub Copilot device-code auth** (skipped on re-runs if a token is already present).
 6. Register the `gc2cc-copilot-api` Windows Service (LocalSystem, auto-start, crash-restart, NSSM-native log rotation at 5 MB) and start it.
 7. `npm install -g @anthropic-ai/claude-code` into your *user* npm prefix.
@@ -155,7 +155,7 @@ irm https://bakapiano.github.io/gc2cc/status.ps1 -OutFile status.ps1
 
 Easiest: `ccp upgrade` — it fetches the latest `install.ps1` from Pages and re-runs it (will trigger UAC). Equivalent to running the one-liner again.
 
-Either path always runs `npm install -g @jeffreycao/copilot-api@latest`, so a re-run picks up upstream proxy fixes (the project ships near-daily — check `package.json` version in `%LOCALAPPDATA%\gc2cc\npm\global\node_modules\@jeffreycao\copilot-api\`).
+Either path always runs `npm install -g @jeffreycao/copilot-api@1.13.2`, so a re-run keeps the proxy pinned to the tested version (check `package.json` in `%LOCALAPPDATA%\gc2cc\npm\global\node_modules\@jeffreycao\copilot-api\`).
 
 > **Heads-up:** the upgrade stops the running service, swaps it, and restarts. There's a 1–3s window where `localhost:4141` is unreachable. Don't `ccp upgrade` while a long-running `claude` task is mid-flight.
 
@@ -184,7 +184,7 @@ Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-
 
 `-InstallClis` accepts a comma-separated list (`ccp`, `cxp`, `ccp,cxp`, or empty string for proxy-only). Without it, the installer prompts interactively. `-NonInteractive` skips the prompt and defaults to `ccp`.
 
-`-NpmPackage` defaults to `@jeffreycao/copilot-api@latest`. Pin a version (`@jeffreycao/copilot-api@1.10.7`) or swap to a different fork (`@somebody-else/copilot-api@latest`) without code changes.
+`-NpmPackage` defaults to `@jeffreycao/copilot-api@1.13.2`. Override it to pin another version (`@jeffreycao/copilot-api@1.10.7`) or swap to a different fork (`@somebody-else/copilot-api@latest`) without code changes.
 
 ## Layout
 

@@ -26,7 +26,7 @@ param(
     [int]    $Port         = 4141,
     [string] $ServiceName  = 'gc2cc-copilot-api',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
-    [string] $NpmPackage   = '@jeffreycao/copilot-api@latest',
+    [string] $NpmPackage   = '@jeffreycao/copilot-api@1.13.2',
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
     # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
