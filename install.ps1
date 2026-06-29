@@ -553,6 +553,11 @@ base_url = "http://localhost:$Port/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 requires_openai_auth = false
+# Resilience vs intermittent upstream SSE cuts ("stream closed before response.completed",
+# caozhiyuan/copilot-api#81): more reconnects + a long idle ceiling for xhigh reasoning gaps.
+stream_max_retries = 10
+request_max_retries = 8
+stream_idle_timeout_ms = 900000
 "@
     $tablePattern = '(?ms)^\[model_providers\.gc2cc\].*?(?=^\[|\z)'
     if ($raw -match $tablePattern) {
@@ -597,6 +602,11 @@ base_url = "http://localhost:$Port/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 requires_openai_auth = false
+# Resilience vs intermittent upstream SSE cuts ("stream closed before response.completed",
+# caozhiyuan/copilot-api#81): more reconnects + a long idle ceiling for xhigh reasoning gaps.
+stream_max_retries = 10
+request_max_retries = 8
+stream_idle_timeout_ms = 900000
 "@
     if (-not (Test-Path $codexCfgPath)) {
         Set-Content -Path $codexCfgPath -Value $codexCfg -Encoding UTF8
