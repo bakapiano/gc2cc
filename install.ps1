@@ -555,8 +555,8 @@ env_key = "OPENAI_API_KEY"
 requires_openai_auth = false
 # Resilience vs intermittent upstream SSE cuts ("stream closed before response.completed",
 # caozhiyuan/copilot-api#81): more reconnects + a long idle ceiling for xhigh reasoning gaps.
-stream_max_retries = 10
-request_max_retries = 8
+stream_max_retries = 30
+request_max_retries = 20
 stream_idle_timeout_ms = 900000
 "@
     $tablePattern = '(?ms)^\[model_providers\.gc2cc\].*?(?=^\[|\z)'
@@ -604,8 +604,8 @@ env_key = "OPENAI_API_KEY"
 requires_openai_auth = false
 # Resilience vs intermittent upstream SSE cuts ("stream closed before response.completed",
 # caozhiyuan/copilot-api#81): more reconnects + a long idle ceiling for xhigh reasoning gaps.
-stream_max_retries = 10
-request_max_retries = 8
+stream_max_retries = 30
+request_max_retries = 20
 stream_idle_timeout_ms = 900000
 "@
     if (-not (Test-Path $codexCfgPath)) {
