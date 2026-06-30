@@ -72,6 +72,17 @@ cxp --help                            # show cxp usage + current settings
 
 `cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`). On launch it patches Codex's model catalog from the proxy's `/v1/models` limits and prints `ctx` plus `autoCompactAt`; for 1M-capable GPT models you should see about `ctx=1050K autoCompactAt=945K`, not the bundled ~272K window. By default, `cxp` also launches Codex with `--sandbox danger-full-access --ask-for-approval never`; use `cxp config` to turn that off.
 
+The installer also tunes the shared `copilot-api` config for Codex stability:
+
+```json
+{
+  "useResponsesApiContextManagement": false,
+  "useResponsesApiWebSocket": false
+}
+```
+
+`useResponsesApiContextManagement=false` leaves compaction to Codex/cxp's 1M-aware client-side limits. `useResponsesApiWebSocket=false` forces HTTP `/responses` streaming instead of Copilot's `ws:/responses` transport, avoiding the proxy WebSocket-to-SSE path that can close before `response.completed`. To test or revert the transport choice, edit `~/.local/share/copilot-api/config.json` and restart `gc2cc-copilot-api`.
+
 ### First-run wizard
 
 The very first time you launch `ccp`, if `~/.local/share/gc2cc/ccp.json` doesn't exist, you're walked through the same flow as `ccp config` to set a default model and the bypass-permissions toggle. Hitting Enter for both still creates a placeholder file (defaults preserved) so subsequent launches go straight to the picker.

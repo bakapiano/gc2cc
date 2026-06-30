@@ -387,7 +387,7 @@ foreach ($legacy in @(
     }
 }
 
-# ---------- 6c. disable proxy-side Responses-API auto-compaction ----------
+# ---------- 6c. tune proxy-side Responses-API behavior ----------
 # copilot-api injects `context_management:[{type:compaction, compact_threshold}]`
 # into every upstream /v1/responses request. For gpt-5.5 the default threshold is
 # 272000*0.8 = 217600, so the *server* compacts the conversation at ~217K tokens
@@ -399,6 +399,13 @@ foreach ($legacy in @(
 # injection entirely. ccp/cxp already own compaction client-side
 # (model_auto_compact_token_limit), so disabling the proxy layer is safe and is
 # what actually delivers the full advertised context window.
+#
+# gpt-5.5 advertises both `/responses` and `ws:/responses`. copilot-api defaults
+# to the WebSocket path when available, then translates that stream back to SSE
+# for Codex. In practice the WS path can close before a terminal
+# `response.completed` event, which Codex sees as "stream disconnected before
+# completion". Force HTTP /responses for this proxy so the upstream transport
+# matches Copilot CLI's more stable HTTP streaming path.
 $copilotCfgPath = Join-Path $UserHome '.local\share\copilot-api\config.json'
 try {
     if (Test-Path $copilotCfgPath) {
@@ -407,19 +414,24 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path $copilotCfgPath) | Out-Null
         $cfgObj = [pscustomobject]@{}
     }
-    # PSCustomObject from ConvertFrom-Json: assign if present, Add-Member if not
-    # (direct assignment to a missing property is a no-op on PS5.1).
-    if ($cfgObj.PSObject.Properties.Name -contains 'useResponsesApiContextManagement') {
-        $cfgObj.useResponsesApiContextManagement = $false
-    } else {
-        $cfgObj | Add-Member -MemberType NoteProperty -Name 'useResponsesApiContextManagement' -Value $false
+    foreach ($setting in @(
+        @{ Name = 'useResponsesApiContextManagement'; Value = $false },
+        @{ Name = 'useResponsesApiWebSocket';         Value = $false }
+    )) {
+        # PSCustomObject from ConvertFrom-Json: assign if present, Add-Member if
+        # not (direct assignment to a missing property is a no-op on PS5.1).
+        if ($cfgObj.PSObject.Properties.Name -contains $setting.Name) {
+            $cfgObj.($setting.Name) = $setting.Value
+        } else {
+            $cfgObj | Add-Member -MemberType NoteProperty -Name $setting.Name -Value $setting.Value
+        }
     }
     $cfgJson = $cfgObj | ConvertTo-Json -Depth 50
     # UTF-8 *without* BOM -- Node's JSON.parse chokes on a leading BOM.
     [System.IO.File]::WriteAllText($copilotCfgPath, $cfgJson, (New-Object System.Text.UTF8Encoding $false))
-    Ok "proxy auto-compaction disabled (useResponsesApiContextManagement=false): $copilotCfgPath"
+    Ok "proxy Responses API tuned (contextManagement=false, webSocket=false): $copilotCfgPath"
 } catch {
-    Warn "Could not patch $copilotCfgPath to disable proxy compaction: $_"
+    Warn "Could not patch $copilotCfgPath to tune Responses API behavior: $_"
 }
 
 # ---------- 7. NSSM service ----------
