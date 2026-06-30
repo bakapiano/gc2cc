@@ -8,9 +8,17 @@
 #
 # Usage:
 #   cxp [-Model <id>] [codex args...]
-#   cxp config                           Interactive: pick default model.
+#   cxp config                           Interactive: pick default model and
+#                                        toggle danger-full-access/no-approval.
 #   cxp upgrade                          Re-run the gc2cc one-liner installer.
 #   cxp --help                           Show usage.
+#
+# Config: ~/.local/share/gc2cc/cxp.json
+#   {
+#     "defaultModel": "gpt-5.5",          // null = always prompt
+#     "bypassPermissions": true            // pass --sandbox danger-full-access
+#                                           // and --ask-for-approval never
+#   }
 
 $base       = 'http://localhost:4141'
 $pagesBase  = 'https://bakapiano.github.io/gc2cc'
@@ -20,15 +28,20 @@ $script:cxpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else 
 
 # ---------- config ----------
 function Load-CxpConfig {
+    # User-facing keys: defaultModel, bypassPermissions, reasoningEfforts
+    # Internal cache keys (managed by Test-UpdateAvailable / Invoke-CxpUpgrade,
+    # not surfaced except through the update banner): updateCheckAt, updateAvailable.
+    #
     # reasoningEfforts: per-model map (id -> effort). Levels are constrained to
     # each model's upstream /v1/models capabilities at config time. Stored as a
     # PSCustomObject when round-tripped through JSON, normalized to a hashtable
     # on load so callers can index/assign uniformly.
     $defaults = @{
-        defaultModel     = $null
-        reasoningEfforts = @{}
-        updateCheckAt    = $null
-        updateAvailable  = $false
+        defaultModel      = $null
+        bypassPermissions = $true
+        reasoningEfforts  = @{}
+        updateCheckAt     = $null
+        updateAvailable   = $false
     }
     if (-not (Test-Path $configPath)) { return $defaults }
     try {
@@ -37,7 +50,7 @@ function Load-CxpConfig {
         Write-Warning "[cxp] $configPath is invalid JSON; using defaults"
         return $defaults
     }
-    foreach ($k in 'defaultModel','updateCheckAt','updateAvailable') {
+    foreach ($k in 'defaultModel','bypassPermissions','updateCheckAt','updateAvailable') {
         if ($loaded.PSObject.Properties.Name -contains $k) {
             $defaults[$k] = $loaded.$k
         }
@@ -54,6 +67,20 @@ function Save-CxpConfig($cfg) {
     $dir = Split-Path $configPath -Parent
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $cfg | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+}
+
+function Test-HasCodexArg {
+    param(
+        [object[]]$argv,
+        [string[]]$names
+    )
+    foreach ($tok in $argv) {
+        $s = [string]$tok
+        foreach ($name in $names) {
+            if ($s -eq $name -or $s.StartsWith($name + '=')) { return $true }
+        }
+    }
+    return $false
 }
 
 # ---------- update check (24h-cached) ----------
@@ -195,7 +222,8 @@ cxp -- OpenAI Codex CLI routed through caozhiyuan/copilot-api on $base
 
 Usage:
   cxp [-Model <id>] [codex args...]    Launch codex. -Model skips the picker.
-  cxp config                           Interactive: pick default model.
+  cxp config                           Interactive: pick default model and
+                                       toggle danger-full-access/no-approval.
   cxp upgrade                          Re-run the gc2cc one-liner installer.
   cxp ccsm                             Register cxp as a launchable CLI in
                                        ccsm (~/.ccsm/config.json).
@@ -205,7 +233,8 @@ Isolated CODEX_HOME: $codexHome
   (Your own ~/.codex/config.toml is never touched.)
 Config file: $configPath
 Current settings:
-  defaultModel = $curDefault
+  defaultModel      = $curDefault
+  bypassPermissions = $($cur.bypassPermissions)
 "@
 }
 
@@ -245,7 +274,8 @@ function Invoke-CxpConfig {
     $curDefault = if ($config.defaultModel) { $config.defaultModel } else { '(none -- always prompt)' }
     Write-Host ''
     Write-Host "Current config ($configPath):" -ForegroundColor Cyan
-    Write-Host ('  defaultModel = {0}' -f $curDefault)
+    Write-Host ('  defaultModel      = {0}' -f $curDefault)
+    Write-Host ('  bypassPermissions = {0}' -f $config.bypassPermissions)
     Write-Host ''
 
     $models = Get-AvailableModels
@@ -281,13 +311,21 @@ function Invoke-CxpConfig {
         }
     }
 
+    Write-Host ''
+    $bypassDefault = if ($config.bypassPermissions) { 'Y' } else { 'N' }
+    $bp = Read-Host ('Bypass permissions (--sandbox danger-full-access --ask-for-approval never)? [Y/N, default {0}]' -f $bypassDefault)
+    if (-not [string]::IsNullOrWhiteSpace($bp)) {
+        $config.bypassPermissions = ($bp.Trim() -match '^[Yy]')
+    }
+
     Save-CxpConfig $config
     $newDefault = if ($config.defaultModel) { $config.defaultModel } else { '(none -- always prompt)' }
     Write-Host ''
     Write-Host "Saved to $configPath" -ForegroundColor Green
-    Write-Host ('  defaultModel = {0}' -f $newDefault)
+    Write-Host ('  defaultModel      = {0}' -f $newDefault)
+    Write-Host ('  bypassPermissions = {0}' -f $config.bypassPermissions)
     if ($config.defaultModel -and $config.reasoningEfforts[$config.defaultModel]) {
-        Write-Host ('  reasoningEffort = {0}' -f $config.reasoningEfforts[$config.defaultModel])
+        Write-Host ('  reasoningEffort   = {0}' -f $config.reasoningEfforts[$config.defaultModel])
     }
 }
 
@@ -579,11 +617,24 @@ function Invoke-CodexWithModel($mainModel, $cfg, $passthrough, $stdinInput) {
         $codexArgs += @("-c", "model_auto_compact_token_limit_scope=`"body_after_prefix`"")
     }
     if ($meta.maxOut) { $codexArgs += @("-c", "model_max_output_tokens=$($meta.maxOut)") }
+    $bypassEnabled = [bool]$cfg.bypassPermissions
+    if ($bypassEnabled) {
+        $hasBypass = Test-HasCodexArg -argv $passthrough -names @('--dangerously-bypass-approvals-and-sandbox','--yolo')
+        $hasSandbox = Test-HasCodexArg -argv $passthrough -names @('--sandbox','-s')
+        $hasApproval = Test-HasCodexArg -argv $passthrough -names @('--ask-for-approval','-a')
+        if (-not $hasBypass -and -not $hasSandbox) {
+            $codexArgs += @('--sandbox', 'danger-full-access')
+        }
+        if (-not $hasBypass -and -not $hasApproval) {
+            $codexArgs += @('--ask-for-approval', 'never')
+        }
+    }
     $effNote = if ($eff) { $eff } else { '(codex default)' }
     $ctxNote = if ($meta.ctx) { '{0}K' -f [int]($meta.ctx / 1000) } else { '?' }
     $compactNote = if ($autoCompactLimit) { '{0}K' -f [int]($autoCompactLimit / 1000) } else { '?' }
     $catNote = if ($catalogPath) { 'catalog' } else { 'bundled(272K cap)' }
-    Write-Host ('[cxp] model={0}  effort={1}  ctx={2}  autoCompactAt={3}  compactScope=body_after_prefix  via={4}  CODEX_HOME={5}' -f $mainModel, $effNote, $ctxNote, $compactNote, $catNote, $codexHome) -ForegroundColor Cyan
+    $bypassNote = if ($bypassEnabled) { 'on' } else { 'off' }
+    Write-Host ('[cxp] model={0}  effort={1}  bypass={2}  ctx={3}  autoCompactAt={4}  compactScope=body_after_prefix  via={5}  CODEX_HOME={6}' -f $mainModel, $effNote, $bypassNote, $ctxNote, $compactNote, $catNote, $codexHome) -ForegroundColor Cyan
     if ($null -ne $stdinInput) {
         $stdinInput | & codex @codexArgs @passthrough
     } else {

@@ -66,11 +66,11 @@ ccp upgrade                           # re-run the gc2cc one-liner installer (UA
 
 cxp                                   # same idea but for OpenAI Codex CLI
 cxp -Model gpt-5.5 -- exec "say hi"   # `--` forwards the rest to codex
-cxp config                            # interactive: pick default model
+cxp config                            # interactive: pick default model + toggle Codex bypass permissions
 cxp --help                            # show cxp usage + current settings
 ```
 
-`cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`). On launch it patches Codex's model catalog from the proxy's `/v1/models` limits and prints `ctx` plus `autoCompactAt`; for 1M-capable GPT models you should see about `ctx=1050K autoCompactAt=945K`, not the bundled ~272K window.
+`cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`). On launch it patches Codex's model catalog from the proxy's `/v1/models` limits and prints `ctx` plus `autoCompactAt`; for 1M-capable GPT models you should see about `ctx=1050K autoCompactAt=945K`, not the bundled ~272K window. By default, `cxp` also launches Codex with `--sandbox danger-full-access --ask-for-approval never`; use `cxp config` to turn that off.
 
 ### First-run wizard
 
@@ -101,6 +101,18 @@ Settings live in `~/.local/share/gc2cc/ccp.json`:
 - `bypassPermissions`: pass `--dangerously-skip-permissions` to claude. Default `true` (the original YOLO behavior). Flip it off if you want claude to ask for tool-use confirmations.
 
 (Two other keys — `updateCheckAt` and `updateAvailable` — are managed by ccp itself for the update-banner cache. Don't hand-edit them.)
+
+`cxp` has its own settings file at `~/.local/share/gc2cc/cxp.json`:
+
+```json
+{
+  "defaultModel": "gpt-5.5",
+  "bypassPermissions": true
+}
+```
+
+- `defaultModel`: skip the picker and use this id on plain `cxp`. Set to `null` (or use `cxp config` -> `[0]`) to always prompt.
+- `bypassPermissions`: pass `--sandbox danger-full-access --ask-for-approval never` to Codex. Default `true`, matching ccp's low-friction default. Flip it off if you want Codex's normal sandbox/approval behavior from `%LOCALAPPDATA%\gc2cc\codex-home\config.toml`.
 
 The menu is built fresh from the proxy each time, with these rules:
 
@@ -202,6 +214,7 @@ Switches: `-Port`, `-ServiceName`, `-InstallDir`, `-NpmPackage`, `-SkipAuth`, `-
 | `%LOCALAPPDATA%\gc2cc\logs\install.log` | install transcript (handy when self-elevation fails) |
 | `~\.local\share\copilot-api\github_token` | GitHub Copilot auth (created by `copilot-api auth`) |
 | `~\.local\share\gc2cc\ccp.json` | ccp settings (default model, bypass-permissions, update-check cache); preserved across `uninstall` |
+| `~\.local\share\gc2cc\cxp.json` | cxp settings (default model, Codex bypass-permissions, update-check cache); preserved across `uninstall` |
 | User PATH (HKCU\Environment) | gets `%LOCALAPPDATA%\gc2cc\bin\` appended |
 | HKLM\SYSTEM\...\Services\gc2cc-copilot-api | Windows Service entry |
 
