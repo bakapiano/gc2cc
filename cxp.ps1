@@ -27,6 +27,17 @@ $codexHome  = Join-Path $env:LOCALAPPDATA 'gc2cc\codex-home'
 $proxyService = 'gc2cc-copilot-api'
 $script:cxpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else { $null }
 
+function Get-WindowsPowerShellExe {
+    $candidates = @()
+    if ($env:SystemRoot) { $candidates += (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') }
+    if ($env:WINDIR)     { $candidates += (Join-Path $env:WINDIR     'System32\WindowsPowerShell\v1.0\powershell.exe') }
+    if ($PSHOME)         { $candidates += (Join-Path $PSHOME 'powershell.exe') }
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path $p)) { return $p }
+    }
+    return 'powershell.exe'
+}
+
 # ---------- config ----------
 function Load-CxpConfig {
     # User-facing keys: defaultModel, bypassPermissions, reasoningEfforts
@@ -156,7 +167,7 @@ function Restart-ProxyWithNssm {
     try {
         $nssmEsc = $nssm -replace "'", "''"
         $cmd = "& '$nssmEsc' restart '$proxyService'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$proxyService' }"
-        Start-Process powershell -Verb RunAs -Wait -ArgumentList @(
+        Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -ArgumentList @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-Command', $cmd

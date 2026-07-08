@@ -13,6 +13,7 @@ What this gives you:
 - A `ccp` command **on user PATH** that picks a model and launches `claude --dangerously-skip-permissions` against the proxy. Works in any shell — PS 5.1, PS 7, VSCode terminal, cmd. No profile editing.
 - A `cxp` command (optional, opt-in at install) that does the same for [`@openai/codex`](https://github.com/openai/codex). Uses an **isolated `CODEX_HOME`** under `%LOCALAPPDATA%\gc2cc\codex-home\`, so your own `~/.codex/config.toml` is never touched. Only OpenAI-Responses-capable models (gpt-5.x, gpt-5-codex, gemini-3.x) are listed, since `wire_api = "chat"` is no longer supported by codex.
 - At install time you pick which wrappers to deploy (ccp, cxp, both, or neither).
+- The `ccp.cmd` / `cxp.cmd` shims invoke Windows PowerShell by absolute system path, so they keep working even in shells whose PATH has not refreshed after install.
 - The model menu is **built dynamically** from the proxy's `/v1/models` — restart the service and any new Copilot model (gpt-5.5, gpt-5.6, claude-opus-4.8, …) shows up automatically. No need to bump `ccp.ps1`.
 - The proxy is [`caozhiyuan/copilot-api`](https://github.com/caozhiyuan/copilot-api) (a.k.a. `@jeffreycao/copilot-api` on npm) — the actively maintained fork of `ericc-ch/copilot-api`. Translates between Anthropic Messages / OpenAI Chat Completions / OpenAI Responses APIs so 1M-context Claude models, gpt-5.5 / 5.4 / 5.3-codex, and Anthropic-native features (`interleaved-thinking`, `advanced-tool-use`, `context-management`) all work end-to-end through Claude Code.
 

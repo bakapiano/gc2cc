@@ -30,6 +30,17 @@ $script:ccpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else 
 $proxyConfigPath = Join-Path $HOME '.local\share\copilot-api\config.json'
 $proxyService    = 'gc2cc-copilot-api'
 
+function Get-WindowsPowerShellExe {
+    $candidates = @()
+    if ($env:SystemRoot) { $candidates += (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') }
+    if ($env:WINDIR)     { $candidates += (Join-Path $env:WINDIR     'System32\WindowsPowerShell\v1.0\powershell.exe') }
+    if ($PSHOME)         { $candidates += (Join-Path $PSHOME 'powershell.exe') }
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path $p)) { return $p }
+    }
+    return 'powershell.exe'
+}
+
 # ---------- config ----------
 function Load-CcpConfig {
     # User-facing keys: defaultModel, bypassPermissions, reasoningEfforts
@@ -121,7 +132,7 @@ function Sync-ProxyReasoningEffort($bareId, $effort) {
 
     Write-Host ("[ccp] proxy reasoning effort {0} = {1}; restarting service (UAC)..." -f $bareId, $effort) -ForegroundColor Cyan
     try {
-        Start-Process powershell -Verb RunAs -Wait -ArgumentList @(
+        Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -ArgumentList @(
             '-NoProfile','-Command',"Restart-Service $proxyService"
         ) -ErrorAction Stop
     } catch {
@@ -214,7 +225,7 @@ function Restart-ProxyWithNssm {
     try {
         $nssmEsc = $nssm -replace "'", "''"
         $cmd = "& '$nssmEsc' restart '$proxyService'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$proxyService' }"
-        Start-Process powershell -Verb RunAs -Wait -ArgumentList @(
+        Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -ArgumentList @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-Command', $cmd
