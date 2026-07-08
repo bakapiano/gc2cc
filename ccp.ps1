@@ -442,9 +442,101 @@ function Invoke-CcpUpgrade {
 # Register this wrapper (ccp.cmd) as a CLI in ccsm's config.json so ccsm's
 # Launch page can spawn it directly. ccsm already knows how to run a .cmd via
 # its shell:'direct' strategy (cmd.exe /d /s /c <path>), and uses the `type`
-# field (claude/codex) to pick the matching resume templates. We write straight
-# into ~/.ccsm/config.json (CCSM_HOME honoured), keyed by id so re-running just
-# updates in place and preserves every other key (builtins, user settings).
+# field (claude/codex) to pick the matching resume templates. If ccsm is
+# running, update through its own /api/config so the live backend owns the
+# write. If it is offline, write ~/.ccsm/config.json directly. CCSM_HOME is
+# honoured in both paths.
+function Get-CcsmHome {
+    if ($env:CCSM_HOME) { return $env:CCSM_HOME }
+    return (Join-Path $HOME '.ccsm')
+}
+
+function Get-CcsmPreferredPort {
+    $cfg = Join-Path (Get-CcsmHome) 'config.json'
+    if (Test-Path $cfg) {
+        try {
+            $j = Get-Content $cfg -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($j.port) { return [int]$j.port }
+        } catch {}
+    }
+    return 7777
+}
+
+function Test-CcsmHealth([int]$Port) {
+    try {
+        $r = Invoke-WebRequest -Uri "http://localhost:$Port/api/health" -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
+        $j = $r.Content | ConvertFrom-Json
+        return ($j.name -eq '@bakapiano/ccsm')
+    } catch {
+        return $false
+    }
+}
+
+function Get-RunningCcsmPort {
+    $preferred = Get-CcsmPreferredPort
+    $ports = @($preferred)
+    for ($i = 1; $i -le 9; $i++) { $ports += ($preferred + $i) }
+
+    foreach ($port in $ports) {
+        if (Test-CcsmHealth $port) { return $port }
+    }
+    return $null
+}
+
+function Set-CcsmCliEntry($cfg, $entry, [string]$id) {
+    $existing = @()
+    if (($cfg.PSObject.Properties.Name -contains 'clis') -and $cfg.clis) {
+        $existing = @($cfg.clis | Where-Object { $_.id -ne $id })
+    }
+    $clis = @($existing + $entry)
+    if ($cfg.PSObject.Properties.Name -contains 'clis') {
+        $cfg.clis = $clis
+    } else {
+        $cfg | Add-Member -NotePropertyName 'clis' -NotePropertyValue $clis
+    }
+    return $cfg
+}
+
+function Save-CcsmCliEntry($ccsmHome, $ccsmCfg, $entry, [string]$id) {
+    $runningPort = Get-RunningCcsmPort
+    if ($runningPort) {
+        $baseUrl = "http://localhost:$runningPort"
+        Write-Host "[ccp] ccsm is running on port $runningPort; updating config through /api/config." -ForegroundColor Cyan
+        try {
+            $cfg = (Invoke-WebRequest -Uri "$baseUrl/api/config" -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop).Content | ConvertFrom-Json
+            $cfg = Set-CcsmCliEntry $cfg $entry $id
+            $json = $cfg | ConvertTo-Json -Depth 50
+            Invoke-WebRequest -Uri "$baseUrl/api/config" -Method PUT -Body $json -ContentType 'application/json; charset=utf-8' -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop | Out-Null
+            return "api:$runningPort"
+        } catch {
+            Write-Error "[ccp] failed to update running ccsm via ${baseUrl}: $_"
+            return $null
+        }
+    }
+
+    if (Test-Path $ccsmCfg) {
+        try {
+            $cfg = Get-Content $ccsmCfg -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            Write-Error "[ccp] $ccsmCfg is invalid JSON; refusing to overwrite. Fix or remove it, then re-run 'ccp ccsm'."
+            return $null
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $ccsmHome | Out-Null
+        $cfg = [pscustomobject]@{}
+    }
+
+    $cfg = Set-CcsmCliEntry $cfg $entry $id
+    try {
+        $json = $cfg | ConvertTo-Json -Depth 50
+        [System.IO.File]::WriteAllText($ccsmCfg, $json, (New-Object System.Text.UTF8Encoding $false))
+        return 'file'
+    } catch {
+        Write-Error "[ccp] failed to write ${ccsmCfg}: $_"
+        return $null
+    }
+}
+
 function Invoke-CcpCcsmSetup {
     $ccsmHome = if ($env:CCSM_HOME) { $env:CCSM_HOME } else { Join-Path $HOME '.ccsm' }
     $ccsmCfg  = Join-Path $ccsmHome 'config.json'
@@ -473,39 +565,8 @@ function Invoke-CcpCcsmSetup {
         type             = 'claude'
     }
 
-    # Load existing ccsm config (preserve every other key) or start fresh.
-    if (Test-Path $ccsmCfg) {
-        try {
-            $cfg = Get-Content $ccsmCfg -Raw -Encoding UTF8 | ConvertFrom-Json
-        } catch {
-            Write-Error "[ccp] $ccsmCfg is invalid JSON; refusing to overwrite. Fix or remove it, then re-run 'ccp ccsm'."
-            return
-        }
-    } else {
-        New-Item -ItemType Directory -Force -Path $ccsmHome | Out-Null
-        $cfg = [pscustomobject]@{}
-    }
-
-    # Drop any prior 'ccp' entry, append ours. @(...) keeps clis an array even
-    # when it collapses to a single element.
-    $existing = @()
-    if (($cfg.PSObject.Properties.Name -contains 'clis') -and $cfg.clis) {
-        $existing = @($cfg.clis | Where-Object { $_.id -ne 'ccp' })
-    }
-    $clis = @($existing + $entry)
-    if ($cfg.PSObject.Properties.Name -contains 'clis') {
-        $cfg.clis = $clis
-    } else {
-        $cfg | Add-Member -NotePropertyName 'clis' -NotePropertyValue $clis
-    }
-
-    try {
-        $json = $cfg | ConvertTo-Json -Depth 50
-        [System.IO.File]::WriteAllText($ccsmCfg, $json, (New-Object System.Text.UTF8Encoding $false))
-    } catch {
-        Write-Error "[ccp] failed to write ${ccsmCfg}: $_"
-        return
-    }
+    $saveMode = Save-CcsmCliEntry $ccsmHome $ccsmCfg $entry 'ccp'
+    if (-not $saveMode) { return }
 
     Write-Host ''
     Write-Host "[ccp] Registered 'ccp' as a ccsm CLI." -ForegroundColor Green
@@ -513,7 +574,11 @@ function Invoke-CcpCcsmSetup {
     Write-Host ('  command: {0}' -f $cmdPath)
     Write-Host  '  type   : claude (resume: --continue / --resume)'
     Write-Host ''
-    Write-Host "[ccp] ccsm caches config in memory -- restart ccsm to see it on the Launch page." -ForegroundColor Yellow
+    if ($saveMode -like 'api:*') {
+        Write-Host "[ccp] ccsm is still running; refresh the ccsm page if the Launch picker is already open." -ForegroundColor Yellow
+    } else {
+        Write-Host "[ccp] Start ccsm to see it on the Launch page." -ForegroundColor Yellow
+    }
 }
 
 # ---------- model picker ----------

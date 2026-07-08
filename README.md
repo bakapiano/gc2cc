@@ -63,14 +63,20 @@ ccp --help                            # show ccp usage + current settings
 
 ccp config                            # interactive: pick default model + toggle bypass-permissions
 ccp upgrade                           # re-run the gc2cc one-liner installer (UAC will pop)
+ccp ccsm                              # register ccp in ccsm without stopping ccsm
 
 cxp                                   # same idea but for OpenAI Codex CLI
 cxp -Model gpt-5.5 -- exec "say hi"   # `--` forwards the rest to codex
 cxp config                            # interactive: pick default model + toggle Codex bypass permissions
+cxp ccsm                              # register cxp in ccsm without stopping ccsm
 cxp --help                            # show cxp usage + current settings
 ```
 
 `cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`). On launch it patches Codex's model catalog from the proxy's `/v1/models` limits and prints `ctx` plus `autoCompactAt`; for 1M-capable GPT models you should see about `ctx=1050K autoCompactAt=945K`, not the bundled ~272K window. By default, `cxp` also launches Codex with `--sandbox danger-full-access --ask-for-approval never`; use `cxp config` to turn that off.
+
+`ccp ccsm` and `cxp ccsm` register the wrappers as launchable CLIs in ccsm. If
+ccsm is running, they update it through ccsm's own `/api/config` endpoint; if it
+is offline, they edit `~/.ccsm/config.json` directly. They do not stop ccsm.
 
 The installer also tunes the shared `copilot-api` config for Codex stability:
 
