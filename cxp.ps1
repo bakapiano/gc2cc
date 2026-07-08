@@ -24,6 +24,7 @@ $base       = 'http://localhost:4141'
 $pagesBase  = 'https://bakapiano.github.io/gc2cc'
 $configPath = Join-Path $HOME '.local\share\gc2cc\cxp.json'
 $codexHome  = Join-Path $env:LOCALAPPDATA 'gc2cc\codex-home'
+$proxyService = 'gc2cc-copilot-api'
 $script:cxpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else { $null }
 
 # ---------- config ----------
@@ -130,6 +131,55 @@ function Test-Proxy {
         Invoke-WebRequest "$base/v1/models" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop | Out-Null
         return $true
     } catch { return $false }
+}
+
+function Restart-ProxyWithNssm {
+    $nssm = Join-Path $env:LOCALAPPDATA 'gc2cc\bin\nssm.exe'
+    if (-not (Test-Path $nssm)) {
+        Write-Warning "[cxp] nssm.exe not found at $nssm; cannot auto-restart $proxyService"
+        return $false
+    }
+
+    Write-Host "[cxp] copilot-api is not reachable; trying NSSM restart/start for $proxyService..." -ForegroundColor Yellow
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($action in @('restart', 'start')) {
+            & $nssm $action $proxyService 2>&1 | Out-Host
+            if ($LASTEXITCODE -eq 0) { return $true }
+        }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+
+    Write-Host "[cxp] NSSM restart needs elevation; requesting UAC..." -ForegroundColor Yellow
+    try {
+        $nssmEsc = $nssm -replace "'", "''"
+        $cmd = "& '$nssmEsc' restart '$proxyService'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$proxyService' }"
+        Start-Process powershell -Verb RunAs -Wait -ArgumentList @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-Command', $cmd
+        ) -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Warning "[cxp] NSSM restart failed or was cancelled: $_"
+        return $false
+    }
+}
+
+function Ensure-Proxy {
+    if (Test-Proxy) { return $true }
+    if (-not (Restart-ProxyWithNssm)) { return $false }
+
+    for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Proxy) {
+            Write-Host "[cxp] copilot-api is reachable again." -ForegroundColor Green
+            return $true
+        }
+    }
+    return $false
 }
 
 # Sort key: family bucket first (smaller = higher priority), then version
@@ -266,8 +316,8 @@ function Read-EffortChoice($model, $supported, $current) {
 }
 
 function Invoke-CxpConfig {
-    if (-not (Test-Proxy)) {
-        Write-Error "[cxp] copilot-api not reachable at $base. Check: Get-Service gc2cc-copilot-api"
+    if (-not (Ensure-Proxy)) {
+        Write-Error "[cxp] copilot-api not reachable at $base after NSSM restart attempt. Check: Get-Service gc2cc-copilot-api"
         return
     }
     $config = Load-CxpConfig
@@ -740,8 +790,8 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     }
 }
 
-if (-not (Test-Proxy)) {
-    Write-Error "[cxp] copilot-api not reachable at $base. Check: Get-Service gc2cc-copilot-api"
+if (-not (Ensure-Proxy)) {
+    Write-Error "[cxp] copilot-api not reachable at $base after NSSM restart attempt. Check: Get-Service gc2cc-copilot-api"
     return
 }
 

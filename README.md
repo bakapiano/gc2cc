@@ -78,6 +78,12 @@ cxp --help                            # show cxp usage + current settings
 ccsm is running, they update it through ccsm's own `/api/config` endpoint; if it
 is offline, they edit `~/.ccsm/config.json` directly. They do not stop ccsm.
 
+On launch, `ccp` and `cxp` probe `http://localhost:4141/v1/models`. If the
+proxy is not reachable, they try to recover the Windows Service with
+`%LOCALAPPDATA%\gc2cc\bin\nssm.exe restart gc2cc-copilot-api`, falling back to
+`start` if needed. If service control needs elevation, a UAC prompt is shown;
+after that they wait up to 30 seconds for the proxy to come back before failing.
+
 The installer also tunes the shared `copilot-api` config for Codex stability:
 
 ```json
