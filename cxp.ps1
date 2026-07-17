@@ -589,6 +589,66 @@ function Invoke-ModelPicker {
 #
 # auto_compact_token_limit is patched too so both Codex's model metadata and
 # session config paths agree on the same trigger.
+function Set-CodexCatalogModelLimits($model, [int64]$ctx) {
+    $model | Add-Member -MemberType NoteProperty -Name context_window -Value $ctx -Force
+    $model | Add-Member -MemberType NoteProperty -Name max_context_window -Value $ctx -Force
+    $model | Add-Member -MemberType NoteProperty -Name auto_compact_token_limit `
+        -Value ([int64][math]::Floor($ctx * 0.9)) -Force
+}
+
+function Get-CodexCatalogTemplate($catalogModels, $modelId) {
+    if ($modelId -notmatch '^gpt-\d+(?:\.\d+)?(?:-|$)') { return $null }
+
+    $versionStem = if ($modelId -match '^(gpt-\d+(?:\.\d+)?)') { $matches[1] } else { return $null }
+    $wantMini = $modelId -match '-mini(?:-|$)'
+    $sameVersion = $catalogModels | Where-Object {
+        ($_.slug -eq $versionStem -or $_.slug.StartsWith($versionStem + '-')) -and
+        ([bool]($_.slug -match '-mini(?:-|$)')) -eq $wantMini
+    } | Select-Object -First 1
+    if ($sameVersion) { return $sameVersion }
+
+    return $catalogModels | Where-Object {
+        $_.slug -match '^gpt-\d+(?:\.\d+)?(?:-|$)' -and
+        ([bool]($_.slug -match '-mini(?:-|$)')) -eq $wantMini
+    } | Select-Object -First 1
+}
+
+function Get-CodexCatalogDisplayName($modelId) {
+    return (($modelId -split '-') | ForEach-Object {
+        if ($_ -eq 'gpt') { 'GPT' }
+        elseif ($_.Length -gt 0) { $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }
+    }) -join '-'
+}
+
+function Merge-CodexCatalogModels($catalogModels, $models) {
+    $merged = @($catalogModels)
+    foreach ($model in $merged) {
+        $hit = $models | Where-Object { $_.id -eq $model.slug } | Select-Object -First 1
+        if ($hit -and $hit.ctx) {
+            Set-CodexCatalogModelLimits $model ([int64]$hit.ctx)
+        }
+    }
+
+    # GitHub can expose a new GPT SKU before the installed Codex version has
+    # that slug in its bundled catalog. A startup model_context_window override
+    # then appears to work only until compact/resume reloads model metadata and
+    # falls back to Codex's 272K default (258.4K effective). Clone a compatible
+    # bundled entry so the generated catalog covers that rollout gap. Using
+    # Codex's own entry keeps its schema and base instructions version-matched.
+    foreach ($hit in $models) {
+        if (-not $hit.ctx) { continue }
+        if ($merged | Where-Object { $_.slug -eq $hit.id } | Select-Object -First 1) { continue }
+        $template = Get-CodexCatalogTemplate $merged $hit.id
+        if (-not $template) { continue }
+        $clone = ($template | ConvertTo-Json -Depth 100 -Compress) | ConvertFrom-Json
+        $clone.slug = $hit.id
+        $clone.display_name = Get-CodexCatalogDisplayName $hit.id
+        Set-CodexCatalogModelLimits $clone ([int64]$hit.ctx)
+        $merged += $clone
+    }
+    return $merged
+}
+
 function Write-CodexCatalog($models) {
     $catalogPath = Join-Path $codexHome 'catalog.json'
     try {
@@ -632,19 +692,7 @@ requires_openai_auth = false
         }
         $cat = $raw | ConvertFrom-Json
         if (-not $cat.models) { return $null }
-        foreach ($m in $cat.models) {
-            $hit = $models | Where-Object { $_.id -eq $m.slug } | Select-Object -First 1
-            if ($hit -and $hit.ctx) {
-                $ctx = [int64]$hit.ctx
-                $m.context_window     = $ctx
-                $m.max_context_window = $ctx
-                # Add-Member -Force, not `$m.x = `: the field deserializes from
-                # JSON null and direct assignment throws "property cannot be
-                # found", which would sink the whole catalog into the catch.
-                $m | Add-Member -MemberType NoteProperty -Name auto_compact_token_limit `
-                    -Value ([int64][math]::Floor($ctx * 0.9)) -Force
-            }
-        }
+        $cat.models = @(Merge-CodexCatalogModels $cat.models $models)
         # -Depth 100: ModelInfo is deeply nested; the default depth (2) would
         # stringify nested arrays/objects and corrupt the file. Write UTF-8
         # without BOM so serde_json doesn't choke on a leading byte-order mark.
