@@ -63,12 +63,14 @@ ccp -- --help                         # `--` forwards the rest to claude (so `cc
 ccp --help                            # show ccp usage + current settings
 
 ccp config                            # interactive: pick default model + toggle bypass-permissions
+ccp restart proxy                     # force-restart the local copilot-api proxy (UAC may pop)
 ccp upgrade                           # re-run the gc2cc one-liner installer (UAC will pop)
 ccp ccsm                              # register ccp in ccsm without stopping ccsm
 
 cxp                                   # same idea but for OpenAI Codex CLI
 cxp -Model gpt-5.5 -- exec "say hi"   # `--` forwards the rest to codex
 cxp config                            # interactive: pick default model + toggle Codex bypass permissions
+cxp restart proxy                     # same forced proxy restart + health check
 cxp ccsm                              # register cxp in ccsm without stopping ccsm
 cxp --help                            # show cxp usage + current settings
 ```
@@ -84,6 +86,8 @@ proxy is not reachable, they try to recover the Windows Service with
 `%LOCALAPPDATA%\gc2cc\bin\nssm.exe restart gc2cc-copilot-api`, falling back to
 `start` if needed. If service control needs elevation, a UAC prompt is shown;
 after that they wait up to 30 seconds for the proxy to come back before failing.
+Use `ccp restart proxy` or `cxp restart proxy` to force the same restart and
+health-check flow even while the proxy is currently reachable.
 
 The installer also tunes the shared `copilot-api` config for Codex stability:
 
@@ -183,7 +187,7 @@ irm https://bakapiano.github.io/gc2cc/status.ps1 | iex            # show service
 
 # or download for arg passing:
 irm https://bakapiano.github.io/gc2cc/status.ps1 -OutFile status.ps1
-.\status.ps1 -Action restart    # needs admin
+.\status.ps1 -Action restart    # prompts for UAC
 .\status.ps1 -Action tail
 ```
 

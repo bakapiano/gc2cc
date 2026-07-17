@@ -9,6 +9,7 @@
 #                                        config if set, otherwise prompts.
 #   ccp config                           Interactive: pick default model and
 #                                        toggle --dangerously-skip-permissions.
+#   ccp restart proxy                    Force-restart the copilot-api service.
 #   ccp upgrade                          Re-run the gc2cc one-liner installer
 #                                        (irm | iex from Pages, self-elevates).
 #   ccp --help                           Show usage.
@@ -132,9 +133,16 @@ function Sync-ProxyReasoningEffort($bareId, $effort) {
 
     Write-Host ("[ccp] proxy reasoning effort {0} = {1}; restarting service (UAC)..." -f $bareId, $effort) -ForegroundColor Cyan
     try {
-        Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -ArgumentList @(
-            '-NoProfile','-Command',"Restart-Service $proxyService"
+        $serviceEsc = $proxyService -replace "'", "''"
+        $cmd = "try { Restart-Service -Name '$serviceEsc' -ErrorAction Stop; exit 0 } catch { Write-Error `$_; exit 1 }"
+        $restartProcess = Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -PassThru -ArgumentList @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-Command', $cmd
         ) -ErrorAction Stop
+        if ($restartProcess.ExitCode -ne 0) {
+            throw "elevated Restart-Service failed (exit $($restartProcess.ExitCode))"
+        }
     } catch {
         Write-Warning "[ccp] service restart was cancelled or failed; effort is written but not yet live: $_"
         return
@@ -205,11 +213,11 @@ function Test-Proxy {
 function Restart-ProxyWithNssm {
     $nssm = Join-Path $env:LOCALAPPDATA 'gc2cc\bin\nssm.exe'
     if (-not (Test-Path $nssm)) {
-        Write-Warning "[ccp] nssm.exe not found at $nssm; cannot auto-restart $proxyService"
+        Write-Warning "[ccp] nssm.exe not found at $nssm; cannot restart $proxyService"
         return $false
     }
 
-    Write-Host "[ccp] copilot-api is not reachable; trying NSSM restart/start for $proxyService..." -ForegroundColor Yellow
+    Write-Host "[ccp] trying NSSM restart/start for $proxyService..." -ForegroundColor Yellow
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -224,12 +232,19 @@ function Restart-ProxyWithNssm {
     Write-Host "[ccp] NSSM restart needs elevation; requesting UAC..." -ForegroundColor Yellow
     try {
         $nssmEsc = $nssm -replace "'", "''"
-        $cmd = "& '$nssmEsc' restart '$proxyService'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$proxyService' }"
-        Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -ArgumentList @(
+        $serviceEsc = $proxyService -replace "'", "''"
+        # Propagate NSSM's final exit code to this process. Start-Process itself
+        # succeeds as soon as the elevated child launches, even if NSSM fails.
+        $cmd = "& '$nssmEsc' restart '$serviceEsc'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$serviceEsc' }; exit `$LASTEXITCODE"
+        $restartProcess = Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -PassThru -ArgumentList @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-Command', $cmd
         ) -ErrorAction Stop
+        if ($restartProcess.ExitCode -ne 0) {
+            Write-Warning "[ccp] elevated NSSM restart/start failed (exit $($restartProcess.ExitCode))."
+            return $false
+        }
         return $true
     } catch {
         Write-Warning "[ccp] NSSM restart failed or was cancelled: $_"
@@ -237,18 +252,33 @@ function Restart-ProxyWithNssm {
     }
 }
 
-function Ensure-Proxy {
-    if (Test-Proxy) { return $true }
+function Restart-ProxyAndWait {
     if (-not (Restart-ProxyWithNssm)) { return $false }
 
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Proxy) {
-            Write-Host "[ccp] copilot-api is reachable again." -ForegroundColor Green
             return $true
         }
     }
     return $false
+}
+
+function Ensure-Proxy {
+    if (Test-Proxy) { return $true }
+    Write-Host "[ccp] copilot-api is not reachable." -ForegroundColor Yellow
+    $restarted = Restart-ProxyAndWait
+    if ($restarted) { Write-Host "[ccp] copilot-api is reachable again." -ForegroundColor Green }
+    return $restarted
+}
+
+function Invoke-CcpProxyRestart {
+    Write-Host "[ccp] force-restarting copilot-api proxy..." -ForegroundColor Cyan
+    if (Restart-ProxyAndWait) {
+        Write-Host "[ccp] copilot-api proxy restarted and is reachable at $base." -ForegroundColor Green
+        return
+    }
+    Write-Error "[ccp] copilot-api restart failed or the proxy did not become reachable at $base within 30 seconds."
 }
 
 # Heuristic small/fast model by family. Keeps main and small in the same
@@ -367,6 +397,8 @@ Usage:
                                        config or prompts via menu.
   ccp config                           Interactive: pick default model and
                                        toggle --dangerously-skip-permissions.
+  ccp restart proxy                    Force-restart copilot-api, then wait
+                                       until its health endpoint responds.
   ccp upgrade                          Re-run the gc2cc one-liner installer
                                        (will trigger UAC).
   ccp ccsm                             Register ccp as a launchable CLI in
@@ -775,6 +807,14 @@ if ($args.Count -gt 0) {
         '-Help'   { Show-Help;        return }
         'help'    { Show-Help;        return }
         'config'  { Invoke-CcpConfig; return }
+        'restart' {
+            if ($args.Count -ne 2 -or $args[1] -ne 'proxy') {
+                Write-Error '[ccp] usage: ccp restart proxy'
+                return
+            }
+            Invoke-CcpProxyRestart
+            return
+        }
         'upgrade' { Invoke-CcpUpgrade; return }
         'ccsm'    { Invoke-CcpCcsmSetup; return }
     }

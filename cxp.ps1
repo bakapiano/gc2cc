@@ -10,6 +10,7 @@
 #   cxp [-Model <id>] [codex args...]
 #   cxp config                           Interactive: pick default model and
 #                                        toggle danger-full-access/no-approval.
+#   cxp restart proxy                    Force-restart the copilot-api service.
 #   cxp upgrade                          Re-run the gc2cc one-liner installer.
 #   cxp --help                           Show usage.
 #
@@ -147,11 +148,11 @@ function Test-Proxy {
 function Restart-ProxyWithNssm {
     $nssm = Join-Path $env:LOCALAPPDATA 'gc2cc\bin\nssm.exe'
     if (-not (Test-Path $nssm)) {
-        Write-Warning "[cxp] nssm.exe not found at $nssm; cannot auto-restart $proxyService"
+        Write-Warning "[cxp] nssm.exe not found at $nssm; cannot restart $proxyService"
         return $false
     }
 
-    Write-Host "[cxp] copilot-api is not reachable; trying NSSM restart/start for $proxyService..." -ForegroundColor Yellow
+    Write-Host "[cxp] trying NSSM restart/start for $proxyService..." -ForegroundColor Yellow
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -166,12 +167,19 @@ function Restart-ProxyWithNssm {
     Write-Host "[cxp] NSSM restart needs elevation; requesting UAC..." -ForegroundColor Yellow
     try {
         $nssmEsc = $nssm -replace "'", "''"
-        $cmd = "& '$nssmEsc' restart '$proxyService'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$proxyService' }"
-        Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -ArgumentList @(
+        $serviceEsc = $proxyService -replace "'", "''"
+        # Propagate NSSM's final exit code to this process. Start-Process itself
+        # succeeds as soon as the elevated child launches, even if NSSM fails.
+        $cmd = "& '$nssmEsc' restart '$serviceEsc'; if (`$LASTEXITCODE -ne 0) { & '$nssmEsc' start '$serviceEsc' }; exit `$LASTEXITCODE"
+        $restartProcess = Start-Process (Get-WindowsPowerShellExe) -Verb RunAs -Wait -PassThru -ArgumentList @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-Command', $cmd
         ) -ErrorAction Stop
+        if ($restartProcess.ExitCode -ne 0) {
+            Write-Warning "[cxp] elevated NSSM restart/start failed (exit $($restartProcess.ExitCode))."
+            return $false
+        }
         return $true
     } catch {
         Write-Warning "[cxp] NSSM restart failed or was cancelled: $_"
@@ -179,18 +187,33 @@ function Restart-ProxyWithNssm {
     }
 }
 
-function Ensure-Proxy {
-    if (Test-Proxy) { return $true }
+function Restart-ProxyAndWait {
     if (-not (Restart-ProxyWithNssm)) { return $false }
 
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Proxy) {
-            Write-Host "[cxp] copilot-api is reachable again." -ForegroundColor Green
             return $true
         }
     }
     return $false
+}
+
+function Ensure-Proxy {
+    if (Test-Proxy) { return $true }
+    Write-Host "[cxp] copilot-api is not reachable." -ForegroundColor Yellow
+    $restarted = Restart-ProxyAndWait
+    if ($restarted) { Write-Host "[cxp] copilot-api is reachable again." -ForegroundColor Green }
+    return $restarted
+}
+
+function Invoke-CxpProxyRestart {
+    Write-Host "[cxp] force-restarting copilot-api proxy..." -ForegroundColor Cyan
+    if (Restart-ProxyAndWait) {
+        Write-Host "[cxp] copilot-api proxy restarted and is reachable at $base." -ForegroundColor Green
+        return
+    }
+    Write-Error "[cxp] copilot-api restart failed or the proxy did not become reachable at $base within 30 seconds."
 }
 
 # Sort key: family bucket first (smaller = higher priority), then version
@@ -285,6 +308,8 @@ Usage:
   cxp [-Model <id>] [codex args...]    Launch codex. -Model skips the picker.
   cxp config                           Interactive: pick default model and
                                        toggle danger-full-access/no-approval.
+  cxp restart proxy                    Force-restart copilot-api, then wait
+                                       until its health endpoint responds.
   cxp upgrade                          Re-run the gc2cc one-liner installer.
   cxp ccsm                             Register cxp as a launchable CLI in
                                        ccsm (~/.ccsm/config.json).
@@ -823,6 +848,14 @@ if ($args.Count -gt 0) {
         '-Help'   { Show-Help;        return }
         'help'    { Show-Help;        return }
         'config'  { Invoke-CxpConfig; return }
+        'restart' {
+            if ($args.Count -ne 2 -or $args[1] -ne 'proxy') {
+                Write-Error '[cxp] usage: cxp restart proxy'
+                return
+            }
+            Invoke-CxpProxyRestart
+            return
+        }
         'upgrade' { Invoke-CxpUpgrade; return }
         'ccsm'    { Invoke-CxpCcsmSetup; return }
     }
