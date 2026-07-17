@@ -275,7 +275,11 @@ $NpmGlobal = Join-Path $NpmRoot 'global'
 $NpmCache  = Join-Path $NpmRoot 'cache'
 New-Item -ItemType Directory -Force -Path $NpmGlobal, $NpmCache | Out-Null
 
+$activeNpmRegistry = (& npm.cmd config get registry 2>$null | Select-Object -First 1)
 Info "Installing $NpmPackage into $NpmGlobal ..."
+if ($activeNpmRegistry) {
+    Info "npm registry: $activeNpmRegistry (this step can be quiet for about 30 seconds)"
+}
 # --prefix scopes the global install to our directory. --no-fund/--no-audit
 # drop the well-known noise; -s would ALSO swallow the real failure reason, so
 # we never use it.
