@@ -27,6 +27,7 @@ param(
     [string] $ServiceName  = 'gc2cc-copilot-api',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [string] $NpmPackage   = '@jeffreycao/copilot-api@1.13.2',
+    [string] $NpmRegistry  = '',
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
     # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
@@ -84,6 +85,26 @@ function Ensure-Cmd {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         Die "$Name still not on PATH after install. Open a fresh PowerShell and re-run."
     }
+}
+
+function Resolve-NpmRegistry {
+    $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
+    if (-not $npm) { return $null }
+
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $npm config get registry --location=global 2>$null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($exitCode -ne 0) { return $null }
+
+    $registry = [string]($output | Where-Object { $_ } | Select-Object -Last 1)
+    $registry = $registry.Trim()
+    if ($registry -notmatch '^https?://') { return $null }
+    return $registry
 }
 
 # ---------- error trap: keep the elevated window open ----------
@@ -150,6 +171,13 @@ $cliSet = @($InstallClis -split '[,;\s]+' | Where-Object { $_ -and $_ -ne 'none'
 $WantCcp = $cliSet -contains 'ccp'
 $WantCxp = $cliSet -contains 'cxp'
 
+# Capture the invoking user's global npm source before UAC when npm is already
+# installed. On a brand-new machine npm is installed in the elevated child and
+# the same value is resolved there after prerequisite setup.
+if (-not $NpmRegistry) {
+    $NpmRegistry = Resolve-NpmRegistry
+}
+
 if (-not $isAdmin) {
     Info 'NSSM service registration requires Administrator. Re-launching via UAC...'
     $tmp = Join-Path $env:TEMP ('gc2cc-install-{0}.ps1' -f ([Guid]::NewGuid()))
@@ -174,6 +202,7 @@ if (-not $isAdmin) {
                  '-NssmZipUrl',$NssmZipUrl,
                  '-NssmUpstreamUrl',$NssmUpstreamUrl,
                  '-UserHome',"`"$UserHome`"")
+    if ($NpmRegistry) { $argList += @('-NpmRegistry', "`"$NpmRegistry`"") }
     if ($SkipAuth)       { $argList += '-SkipAuth' }
     if ($SkipClaudeCode) { $argList += '-SkipClaudeCode' }
     if ($SkipPath)       { $argList += '-SkipPath' }
@@ -227,6 +256,11 @@ Ensure-Cmd 'node'   { winget install --id OpenJS.NodeJS -e --silent --accept-pac
 # git is no longer required (we used to git clone bakapiano), but is harmless
 # if already present. Don't install it just for gc2cc.
 
+if (-not $NpmRegistry) { $NpmRegistry = Resolve-NpmRegistry }
+if (-not $NpmRegistry) { Die 'Could not resolve the global npm registry with `npm config get registry --location=global`.' }
+if ($NpmRegistry -notmatch '^https?://') { Die "Invalid npm registry URL: $NpmRegistry" }
+Ok "npm source (global registry): $NpmRegistry"
+
 # ---------- 3. nssm ----------
 # Our GitHub Release hosts a vendored copy of nssm-2.24.zip; upstream nssm.cc
 # is the fallback because it 503s often.
@@ -275,12 +309,7 @@ $NpmGlobal = Join-Path $NpmRoot 'global'
 $NpmCache  = Join-Path $NpmRoot 'cache'
 New-Item -ItemType Directory -Force -Path $NpmGlobal, $NpmCache | Out-Null
 
-$activeNpmRegistry = (& npm.cmd config get registry 2>$null | Select-Object -First 1)
-if ($activeNpmRegistry) { $activeNpmRegistry = ([string]$activeNpmRegistry).Trim() }
-Info "Installing $NpmPackage into $NpmGlobal ..."
-if ($activeNpmRegistry) {
-    Info "npm registry: $activeNpmRegistry (this step can be quiet for about 30 seconds)"
-}
+Info "Installing $NpmPackage into $NpmGlobal (registry=$NpmRegistry) ..."
 # --prefix scopes the global install to our directory. --no-fund/--no-audit
 # drop the well-known noise; -s would ALSO swallow the real failure reason, so
 # we never use it.
@@ -303,17 +332,11 @@ try {
     # Node 22.18.0): `& npm install` is mangled into subcommand "pm" -> npm dies
     # with `Unknown command: "pm"`. The .cmd shim bypasses npm.ps1 entirely.
     # See npm/cli#8528.
-    $npmArgs = @(
-        'install', '-g', $NpmPackage,
-        '--prefix', $NpmGlobal,
-        '--cache', $NpmCache,
-        '--no-fund', '--no-audit'
-    )
-    # --prefix changes npm's globalconfig path. Explicitly forward the registry
-    # resolved before that prefix override so the private install honors the
-    # caller's active npm registry (including corporate package proxies).
-    if ($activeNpmRegistry) { $npmArgs += @('--registry', $activeNpmRegistry) }
-    $npmOutput = & npm.cmd @npmArgs 2>&1
+    $npmOutput = & npm.cmd install -g $NpmPackage `
+        --prefix $NpmGlobal `
+        --cache $NpmCache `
+        --registry $NpmRegistry `
+        --no-fund --no-audit 2>&1
     $npmExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $prev
@@ -522,15 +545,14 @@ function Install-NpmCli {
         Ok "$BinName CLI present: $((Get-Command $BinName).Source)"
         return
     }
-    Info "Installing $Pkg globally (prefix=$npmPrefixUser)..."
+    Info "Installing $Pkg globally (prefix=$npmPrefixUser, registry=$NpmRegistry)..."
     $cliLog = Join-Path $LogDir "npm-$BinName.log"
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
         # npm.cmd, not bare npm -- see npm/cli#8528 note above.
-        $cliArgs = @('--prefix', $npmPrefixUser, 'install', '-g', $Pkg)
-        if ($activeNpmRegistry) { $cliArgs += @('--registry', $activeNpmRegistry) }
-        $cliOut = & npm.cmd @cliArgs 2>&1
+        $cliOut = & npm.cmd --prefix $npmPrefixUser install -g $Pkg `
+            --registry $NpmRegistry 2>&1
     } finally {
         $ErrorActionPreference = $prev
     }
