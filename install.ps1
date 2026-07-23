@@ -276,6 +276,7 @@ $NpmCache  = Join-Path $NpmRoot 'cache'
 New-Item -ItemType Directory -Force -Path $NpmGlobal, $NpmCache | Out-Null
 
 $activeNpmRegistry = (& npm.cmd config get registry 2>$null | Select-Object -First 1)
+if ($activeNpmRegistry) { $activeNpmRegistry = ([string]$activeNpmRegistry).Trim() }
 Info "Installing $NpmPackage into $NpmGlobal ..."
 if ($activeNpmRegistry) {
     Info "npm registry: $activeNpmRegistry (this step can be quiet for about 30 seconds)"
@@ -302,10 +303,17 @@ try {
     # Node 22.18.0): `& npm install` is mangled into subcommand "pm" -> npm dies
     # with `Unknown command: "pm"`. The .cmd shim bypasses npm.ps1 entirely.
     # See npm/cli#8528.
-    $npmOutput = & npm.cmd install -g $NpmPackage `
-        --prefix $NpmGlobal `
-        --cache $NpmCache `
-        --no-fund --no-audit 2>&1
+    $npmArgs = @(
+        'install', '-g', $NpmPackage,
+        '--prefix', $NpmGlobal,
+        '--cache', $NpmCache,
+        '--no-fund', '--no-audit'
+    )
+    # --prefix changes npm's globalconfig path. Explicitly forward the registry
+    # resolved before that prefix override so the private install honors the
+    # caller's active npm registry (including corporate package proxies).
+    if ($activeNpmRegistry) { $npmArgs += @('--registry', $activeNpmRegistry) }
+    $npmOutput = & npm.cmd @npmArgs 2>&1
     $npmExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $prev
@@ -520,7 +528,9 @@ function Install-NpmCli {
     $ErrorActionPreference = 'Continue'
     try {
         # npm.cmd, not bare npm -- see npm/cli#8528 note above.
-        $cliOut = & npm.cmd --prefix $npmPrefixUser install -g $Pkg 2>&1
+        $cliArgs = @('--prefix', $npmPrefixUser, 'install', '-g', $Pkg)
+        if ($activeNpmRegistry) { $cliArgs += @('--registry', $activeNpmRegistry) }
+        $cliOut = & npm.cmd @cliArgs 2>&1
     } finally {
         $ErrorActionPreference = $prev
     }

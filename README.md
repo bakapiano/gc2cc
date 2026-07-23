@@ -31,6 +31,7 @@ The installer will:
 2. Install missing prereqs (`node`, `winget`) — `git` and `bun` are no longer required.
 3. Download `nssm.exe` from our GitHub Release mirror into `%LOCALAPPDATA%\gc2cc\bin\` (with `nssm.cc` as fallback).
 4. `npm install -g @jeffreycao/copilot-api@1.13.2` into a private prefix at `%LOCALAPPDATA%\gc2cc\npm\global\` (so the LocalSystem service has a stable path independent of the user's npm prefix).
+   The installer resolves the active npm registry first and passes it explicitly to private-prefix and CLI installs.
 5. Prompt you once for **GitHub Copilot device-code auth** (skipped on re-runs if a token is already present).
 6. Register the `gc2cc-copilot-api` Windows Service (LocalSystem, auto-start, crash-restart, NSSM-native log rotation at 5 MB) and start it.
 7. `npm install -g @anthropic-ai/claude-code` into your *user* npm prefix.
