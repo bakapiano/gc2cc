@@ -26,7 +26,7 @@ param(
     [int]    $Port         = 4141,
     [string] $ServiceName  = 'gc2cc-copilot-api',
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
-    [string] $NpmPackage   = '@jeffreycao/copilot-api@1.13.2',
+    [string] $NpmPackage   = '@jeffreycao/copilot-api@1.14.14',
     [string] $NpmRegistry  = '',
     [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
@@ -429,8 +429,9 @@ foreach ($legacy in @(
 # regardless of the 1M window cxp advertises to Codex. That server-driven
 # compaction arrives as a `Compaction` stream item the client just applies, so
 # it is invisible to Codex's own auto-compact limits and cannot be tuned from the
-# cxp side. The only lever is the proxy's own switch: gating reads
-# `useResponsesApiContextManagement ?? true`, so setting it false stops the
+# cxp side. copilot-api <=1.13.19 uses the flat
+# `useResponsesApiContextManagement` switch; >=1.13.20 uses
+# `contextManagement.responses`. Setting the applicable switch false stops the
 # injection entirely. ccp/cxp already own compaction client-side
 # (model_auto_compact_token_limit), so disabling the proxy layer is safe and is
 # what actually delivers the full advertised context window.
@@ -461,10 +462,30 @@ try {
             $cfgObj | Add-Member -MemberType NoteProperty -Name $setting.Name -Value $setting.Value
         }
     }
+    # 1.13.20 replaced the legacy flat context-management switch with a nested
+    # object. Set both schemas so the public -NpmPackage override remains safe
+    # for older versions while the pinned package follows the current schema.
+    $contextManagement = $null
+    if ($cfgObj.PSObject.Properties.Name -contains 'contextManagement') {
+        $contextManagement = $cfgObj.contextManagement
+    }
+    if ($null -eq $contextManagement -or -not ($contextManagement -is [pscustomobject])) {
+        $contextManagement = [pscustomobject]@{}
+        if ($cfgObj.PSObject.Properties.Name -contains 'contextManagement') {
+            $cfgObj.contextManagement = $contextManagement
+        } else {
+            $cfgObj | Add-Member -MemberType NoteProperty -Name 'contextManagement' -Value $contextManagement
+        }
+    }
+    if ($contextManagement.PSObject.Properties.Name -contains 'responses') {
+        $contextManagement.responses = $false
+    } else {
+        $contextManagement | Add-Member -MemberType NoteProperty -Name 'responses' -Value $false
+    }
     $cfgJson = $cfgObj | ConvertTo-Json -Depth 50
     # UTF-8 *without* BOM -- Node's JSON.parse chokes on a leading BOM.
     [System.IO.File]::WriteAllText($copilotCfgPath, $cfgJson, (New-Object System.Text.UTF8Encoding $false))
-    Ok "proxy Responses API tuned (contextManagement=false, webSocket=false): $copilotCfgPath"
+    Ok "proxy Responses API tuned (contextManagement.responses=false, webSocket=false): $copilotCfgPath"
 } catch {
     Warn "Could not patch $copilotCfgPath to tune Responses API behavior: $_"
 }
