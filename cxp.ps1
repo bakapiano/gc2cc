@@ -692,7 +692,7 @@ function Write-CodexCatalog($models) {
 model_provider = "gc2cc"
 model = "gpt-5.5"
 [model_providers.gc2cc]
-name = "gc2cc copilot-api"
+name = "OpenAI"
 base_url = "$base/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"

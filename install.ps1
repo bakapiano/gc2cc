@@ -617,7 +617,9 @@ function Update-CodexManagedConfig {
     # tables and every other section are left untouched.
     $block = @"
 [model_providers.gc2cc]
-name = "gc2cc copilot-api"
+# copilot-api requires the OpenAI provider identity so Codex reuses encrypted
+# Responses/tool content and compaction cache entries on the compatible path.
+name = "OpenAI"
 base_url = "http://localhost:$Port/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
@@ -666,7 +668,9 @@ model_auto_compact_token_limit_scope = "body_after_prefix"
 approval_policy = "on-failure"
 
 [model_providers.gc2cc]
-name = "gc2cc copilot-api"
+# Keep this exact provider name for encrypted Responses/tool-content
+# compatibility with copilot-api (caozhiyuan/copilot-api#339).
+name = "OpenAI"
 base_url = "http://localhost:$Port/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"

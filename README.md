@@ -78,6 +78,12 @@ cxp --help                            # show cxp usage + current settings
 
 `cxp` uses an isolated `CODEX_HOME` at `%LOCALAPPDATA%\gc2cc\codex-home\` — codex's own state (project trust, NUX flags, etc.) lands there, never in your user `~/.codex`. Only models that expose `/v1/responses` are listed (Anthropic-native Claude models are filtered out, since codex dropped `wire_api = "chat"`). On launch it patches Codex's model catalog from the proxy's `/v1/models` limits and prints `ctx` plus `autoCompactAt`; for 1M-capable GPT models you should see about `ctx=1050K autoCompactAt=945K`, not the bundled ~272K window. By default, `cxp` also launches Codex with `--sandbox danger-full-access --ask-for-approval never`; use `cxp config` to turn that off.
 
+The managed provider's display name is intentionally `OpenAI`. `copilot-api`
+requires that exact identity for Codex encrypted Responses/tool-content and
+compaction-cache compatibility; changing it can make a resumed session fail
+with `Encrypted function output content could not be decrypted or decoded`
+([copilot-api#339](https://github.com/caozhiyuan/copilot-api/issues/339)).
+
 `ccp ccsm` and `cxp ccsm` register the wrappers as launchable CLIs in ccsm. If
 ccsm is running, they update it through ccsm's own `/api/config` endpoint; if it
 is offline, they edit `~/.ccsm/config.json` directly. They do not stop ccsm.
