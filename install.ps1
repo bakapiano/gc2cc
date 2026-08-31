@@ -107,6 +107,18 @@ function Resolve-NpmRegistry {
     return $registry
 }
 
+function Resolve-CopilotPatchPath {
+    param(
+        [string] $ScriptRoot,
+        [Parameter(Mandatory = $true)][string] $TargetInstallDir
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ScriptRoot)) {
+        $sibling = Join-Path $ScriptRoot 'patch-copilot-api.ps1'
+        if (Test-Path -LiteralPath $sibling) { return $sibling }
+    }
+    return Join-Path $TargetInstallDir 'patch-copilot-api.ps1'
+}
+
 # ---------- error trap: keep the elevated window open ----------
 # When relaunched via UAC (-Elevated), the child runs in a *fresh* console that
 # closes the instant the script returns -- so a thrown error (Die / any Stop)
@@ -372,7 +384,9 @@ Ok "copilot-api installed: $copilotCmd"
 # replaces the proxy bundle. It changes only an in-memory upstream request and
 # never edits Codex's persisted transcript.
 $copilotPackageRoot = Join-Path $NpmGlobal 'node_modules\@jeffreycao\copilot-api'
-$copilotPatch = Join-Path $PSScriptRoot 'patch-copilot-api.ps1'
+$copilotPatch = Resolve-CopilotPatchPath `
+    -ScriptRoot $PSScriptRoot `
+    -TargetInstallDir $InstallDir
 if (-not (Test-Path -LiteralPath $copilotPatch)) {
     # `irm install.ps1 | iex` and the UAC child have only install.ps1 locally.
     # Fetch the companion from the same published Pages revision.
@@ -383,6 +397,7 @@ if (-not (Test-Path -LiteralPath $copilotPatch)) {
         Die "Could not download compatibility patch from $PagesBaseUrl`: $_"
     }
 }
+
 try {
     & $copilotPatch -PackageRoot $copilotPackageRoot
 } catch {
