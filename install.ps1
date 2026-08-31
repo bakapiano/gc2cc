@@ -368,6 +368,28 @@ if (-not (Test-Path $copilotEntry)) {
 }
 Ok "copilot-api installed: $copilotCmd"
 
+# Reapply gc2cc's narrow, version-checked encrypted replay recovery after npm
+# replaces the proxy bundle. It changes only an in-memory upstream request and
+# never edits Codex's persisted transcript.
+$copilotPackageRoot = Join-Path $NpmGlobal 'node_modules\@jeffreycao\copilot-api'
+$copilotPatch = Join-Path $PSScriptRoot 'patch-copilot-api.ps1'
+if (-not (Test-Path -LiteralPath $copilotPatch)) {
+    # `irm install.ps1 | iex` and the UAC child have only install.ps1 locally.
+    # Fetch the companion from the same published Pages revision.
+    $copilotPatch = Join-Path $InstallDir 'patch-copilot-api.ps1'
+    try {
+        Invoke-WebRequest -Uri "$PagesBaseUrl/patch-copilot-api.ps1" -OutFile $copilotPatch -UseBasicParsing
+    } catch {
+        Die "Could not download compatibility patch from $PagesBaseUrl`: $_"
+    }
+}
+try {
+    & $copilotPatch -PackageRoot $copilotPackageRoot
+} catch {
+    Die "Could not apply copilot-api encrypted replay recovery: $_"
+}
+Ok 'copilot-api encrypted replay recovery is installed'
+
 $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $nodeExe) { Die "node.exe not on PATH even after Ensure-Cmd; aborting." }
 

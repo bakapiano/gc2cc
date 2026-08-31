@@ -32,16 +32,24 @@ The installer will:
 3. Read and print the global npm source (`npm config get registry --location=global`); every package install explicitly uses that URL via `--registry`.
 4. Download `nssm.exe` from our GitHub Release mirror into `%LOCALAPPDATA%\gc2cc\bin\` (with `nssm.cc` as fallback).
 5. `npm install -g @jeffreycao/copilot-api@1.14.14` into a private prefix at `%LOCALAPPDATA%\gc2cc\npm\global\` (so the LocalSystem service has a stable path independent of the user's npm prefix).
-6. Prompt you once for **GitHub Copilot device-code auth** (skipped on re-runs if a token is already present).
-7. Register the `gc2cc-copilot-api` Windows Service (LocalSystem, auto-start, crash-restart, NSSM-native log rotation at 5 MB) and start it.
-8. `npm install -g @anthropic-ai/claude-code` into your *user* npm prefix.
-9. Drop `ccp.ps1` + `ccp.cmd` into `%LOCALAPPDATA%\gc2cc\bin\` and add that dir to your **user PATH** (HKCU).
+6. Apply gc2cc's version-checked encrypted-replay recovery patch to that private proxy installation.
+7. Prompt you once for **GitHub Copilot device-code auth** (skipped on re-runs if a token is already present).
+8. Register the `gc2cc-copilot-api` Windows Service (LocalSystem, auto-start, crash-restart, NSSM-native log rotation at 5 MB) and start it.
+9. `npm install -g @anthropic-ai/claude-code` into your *user* npm prefix.
+10. Drop `ccp.ps1` + `ccp.cmd` into `%LOCALAPPDATA%\gc2cc\bin\` and add that dir to your **user PATH** (HKCU).
 
 Open a **fresh** shell after install so PATH refreshes.
 
 ### Re-running install (upgrade-safe)
 
 `install.ps1` is idempotent and tolerates every prior gc2cc layout we've ever shipped:
+
+The compatibility patch is also idempotent. It sends the original Responses
+request first. Only when Copilot rejects encrypted replay content before any
+answer or tool output does it remove the oldest encrypted reasoning item from
+the in-memory request and retry, up to 32 times. It stops at the first success,
+does not edit the Codex transcript or visible chat messages, and logs only the
+number of removed items.
 
 - **Pre-NSSM Scheduled Task** (`\gc2cc\gc2cc-copilot-api`): stopped and unregistered.
 - **NSSM + bakapiano (git clone + bun)**: stale `copilot-api/` and `run-proxy.ps1` are deleted; the service is removed and re-registered to exec `node` on the new npm-installed `@jeffreycao/copilot-api` entrypoint.
