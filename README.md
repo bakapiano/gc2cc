@@ -1,9 +1,9 @@
 # gc2cc
 
-[![Stars](https://img.shields.io/github/stars/bakapiano/gc2cc?style=flat&logo=github)](https://github.com/bakapiano/gc2cc/stargazers)
-[![Installs](https://img.shields.io/github/downloads/bakapiano/gc2cc/install-counter/gc2cc-install-counter.txt?label=installs&color=blue)](https://github.com/bakapiano/gc2cc/releases/tag/install-counter)
-[![NSSM downloads](https://img.shields.io/github/downloads/bakapiano/gc2cc/nssm-2.24/nssm-2.24.zip?label=nssm.zip%20pulls&color=gray)](https://github.com/bakapiano/gc2cc/releases/tag/nssm-2.24)
-[![Last commit](https://img.shields.io/github/last-commit/bakapiano/gc2cc?label=last%20commit)](https://github.com/bakapiano/gc2cc/commits/main)
+[![Stars](https://img.shields.io/github/stars/escapecat/gc2cc?style=flat&logo=github)](https://github.com/escapecat/gc2cc/stargazers)
+[![Installs](https://img.shields.io/github/downloads/escapecat/gc2cc/install-counter/gc2cc-install-counter.txt?label=installs&color=blue)](https://github.com/escapecat/gc2cc/releases/tag/install-counter)
+[![NSSM downloads](https://img.shields.io/github/downloads/escapecat/gc2cc/nssm-2.24/nssm-2.24.zip?label=nssm.zip%20pulls&color=gray)](https://github.com/escapecat/gc2cc/releases/tag/nssm-2.24)
+[![Last commit](https://img.shields.io/github/last-commit/escapecat/gc2cc?label=last%20commit)](https://github.com/escapecat/gc2cc/commits/main)
 
 Run **Claude Code** *or* **OpenAI Codex CLI** backed by **GitHub Copilot's models** on Windows, with a one-line installer.
 
@@ -20,7 +20,7 @@ What this gives you:
 ## Install
 
 ```powershell
-irm https://bakapiano.github.io/gc2cc/install.ps1 | iex
+irm https://escapecat.github.io/gc2cc/install.ps1 | iex
 ```
 
 The installer needs **Administrator** (Windows Services live in `HKLM\SYSTEM\...\Services` + the SCM). Run the one-liner from a normal shell — it self-elevates via UAC, you'll see one prompt, and the elevated instance does the work.
@@ -198,10 +198,10 @@ Logs: `%LOCALAPPDATA%\gc2cc\logs\copilot-api.log` (NSSM online rotation at 5 MB;
 Quick health check + log helper:
 
 ```powershell
-irm https://bakapiano.github.io/gc2cc/status.ps1 | iex            # show service + reachable models
+irm https://escapecat.github.io/gc2cc/status.ps1 | iex            # show service + reachable models
 
 # or download for arg passing:
-irm https://bakapiano.github.io/gc2cc/status.ps1 -OutFile status.ps1
+irm https://escapecat.github.io/gc2cc/status.ps1 -OutFile status.ps1
 .\status.ps1 -Action restart    # prompts for UAC
 .\status.ps1 -Action tail
 ```
@@ -217,7 +217,7 @@ Either path always runs `npm install -g @jeffreycao/copilot-api@1.14.14`, so a r
 ## Uninstall
 
 ```powershell
-irm https://bakapiano.github.io/gc2cc/uninstall.ps1 | iex
+irm https://escapecat.github.io/gc2cc/uninstall.ps1 | iex
 ```
 
 Self-elevates via UAC, then removes the service, the install dir (including `bin/`, `npm/`, and `codex-home/`), the user-PATH entry, the global `@anthropic-ai/claude-code` and `@openai/codex` packages, and any legacy `ccp` block left over in `$PROFILE`. Also best-effort cleans up legacy Scheduled Tasks from pre-NSSM installs.
@@ -231,7 +231,7 @@ The GitHub Copilot auth token at `~\.local\share\copilot-api\github_token` is **
 The `irm | iex` form doesn't accept arguments. To override defaults:
 
 ```powershell
-irm https://bakapiano.github.io/gc2cc/install.ps1 -OutFile install.ps1
+irm https://escapecat.github.io/gc2cc/install.ps1 -OutFile install.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1 -Port 5151 -SkipClaudeCode
 ```
 
@@ -267,7 +267,7 @@ The service runs at boot (no user login required), so it survives sign-out, lock
 
 ## Star history
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bakapiano/gc2cc&type=Date)](https://star-history.com/#bakapiano/gc2cc&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=escapecat/gc2cc&type=Date)](https://star-history.com/#escapecat/gc2cc&Date)
 
 ## What we count
 

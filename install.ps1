@@ -28,11 +28,11 @@ param(
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [string] $NpmPackage   = '@jeffreycao/copilot-api@1.14.14',
     [string] $NpmRegistry  = '',
-    [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
+    [string] $PagesBaseUrl = 'https://escapecat.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
     # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
     # upstream URL itself, in case we ever lose the release.
-    [string] $NssmZipUrl   = 'https://github.com/bakapiano/gc2cc/releases/download/nssm-2.24/nssm-2.24.zip',
+    [string] $NssmZipUrl   = 'https://github.com/escapecat/gc2cc/releases/download/nssm-2.24/nssm-2.24.zip',
     [string] $NssmUpstreamUrl = 'https://nssm.cc/release/nssm-2.24.zip',
     [string] $UserHome     = $env:USERPROFILE,
     [switch] $SkipAuth,
@@ -105,6 +105,18 @@ function Resolve-NpmRegistry {
     $registry = $registry.Trim()
     if ($registry -notmatch '^https?://') { return $null }
     return $registry
+}
+
+function Resolve-CopilotPatchPath {
+    param(
+        [string] $ScriptRoot,
+        [Parameter(Mandatory = $true)][string] $TargetInstallDir
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ScriptRoot)) {
+        $sibling = Join-Path $ScriptRoot 'patch-copilot-api.ps1'
+        if (Test-Path -LiteralPath $sibling) { return $sibling }
+    }
+    return Join-Path $TargetInstallDir 'patch-copilot-api.ps1'
 }
 
 # ---------- error trap: keep the elevated window open ----------
@@ -231,7 +243,7 @@ Info "Install root: $InstallDir (elevated as $env:USERNAME, pinned to $UserHome)
 # GitHub download count is the metric, no telemetry / no user info collected.
 # Best-effort: any failure is silent so an offline install still proceeds.
 try {
-    Invoke-WebRequest -Uri 'https://github.com/bakapiano/gc2cc/releases/download/install-counter/gc2cc-install-counter.txt' `
+    Invoke-WebRequest -Uri 'https://github.com/escapecat/gc2cc/releases/download/install-counter/gc2cc-install-counter.txt' `
         -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop | Out-Null
 } catch {}
 
@@ -372,7 +384,9 @@ Ok "copilot-api installed: $copilotCmd"
 # replaces the proxy bundle. It changes only an in-memory upstream request and
 # never edits Codex's persisted transcript.
 $copilotPackageRoot = Join-Path $NpmGlobal 'node_modules\@jeffreycao\copilot-api'
-$copilotPatch = Join-Path $PSScriptRoot 'patch-copilot-api.ps1'
+$copilotPatch = Resolve-CopilotPatchPath `
+    -ScriptRoot $PSScriptRoot `
+    -TargetInstallDir $InstallDir
 if (-not (Test-Path -LiteralPath $copilotPatch)) {
     # `irm install.ps1 | iex` and the UAC child have only install.ps1 locally.
     # Fetch the companion from the same published Pages revision.
@@ -383,6 +397,7 @@ if (-not (Test-Path -LiteralPath $copilotPatch)) {
         Die "Could not download compatibility patch from $PagesBaseUrl`: $_"
     }
 }
+
 try {
     & $copilotPatch -PackageRoot $copilotPackageRoot
 } catch {

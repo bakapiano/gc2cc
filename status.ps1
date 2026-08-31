@@ -4,7 +4,7 @@
     Quick status / log helper for gc2cc.
 
 .EXAMPLE
-    irm https://bakapiano.github.io/gc2cc/status.ps1 | iex    # show
+    irm https://escapecat.github.io/gc2cc/status.ps1 | iex    # show
     .\status.ps1 -Action restart                              # restart service (UAC)
     .\status.ps1 -Action tail                                 # follow logs
 #>
