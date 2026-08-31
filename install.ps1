@@ -28,11 +28,11 @@ param(
     [string] $InstallDir   = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
     [string] $NpmPackage   = '@jeffreycao/copilot-api@1.14.14',
     [string] $NpmRegistry  = '',
-    [string] $PagesBaseUrl = 'https://bakapiano.github.io/gc2cc',
+    [string] $PagesBaseUrl = 'https://escapecat.github.io/gc2cc',
     # Primary: vendored zip on our own GitHub Release (byte-identical mirror
     # of the upstream zip from nssm.cc, which 503s frequently). Fallback: the
     # upstream URL itself, in case we ever lose the release.
-    [string] $NssmZipUrl   = 'https://github.com/bakapiano/gc2cc/releases/download/nssm-2.24/nssm-2.24.zip',
+    [string] $NssmZipUrl   = 'https://github.com/escapecat/gc2cc/releases/download/nssm-2.24/nssm-2.24.zip',
     [string] $NssmUpstreamUrl = 'https://nssm.cc/release/nssm-2.24.zip',
     [string] $UserHome     = $env:USERPROFILE,
     [switch] $SkipAuth,
@@ -243,7 +243,7 @@ Info "Install root: $InstallDir (elevated as $env:USERNAME, pinned to $UserHome)
 # GitHub download count is the metric, no telemetry / no user info collected.
 # Best-effort: any failure is silent so an offline install still proceeds.
 try {
-    Invoke-WebRequest -Uri 'https://github.com/bakapiano/gc2cc/releases/download/install-counter/gc2cc-install-counter.txt' `
+    Invoke-WebRequest -Uri 'https://github.com/escapecat/gc2cc/releases/download/install-counter/gc2cc-install-counter.txt' `
         -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop | Out-Null
 } catch {}
 

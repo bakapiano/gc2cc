@@ -21,7 +21,7 @@
 #   }
 
 $base       = 'http://localhost:4141'
-$pagesBase  = 'https://bakapiano.github.io/gc2cc'
+$pagesBase  = 'https://escapecat.github.io/gc2cc'
 $configPath = Join-Path $HOME '.local\share\gc2cc\ccp.json'
 $script:ccpPipelineInput = if ($MyInvocation.ExpectingInput) { @($input) } else { $null }
 # The proxy (copilot-api) reads reasoning effort from ITS OWN config here, keyed

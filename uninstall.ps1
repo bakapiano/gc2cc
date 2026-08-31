@@ -16,7 +16,7 @@ param(
     [int]    $Port           = 4141,
     [string] $ServiceName    = 'gc2cc-copilot-api',
     [string] $InstallDir     = (Join-Path $env:LOCALAPPDATA 'gc2cc'),
-    [string] $PagesBaseUrl   = 'https://bakapiano.github.io/gc2cc',
+    [string] $PagesBaseUrl   = 'https://escapecat.github.io/gc2cc',
     [string] $UserHome       = $env:USERPROFILE,
     [switch] $KeepInstallDir,
     [switch] $KeepClaudeCode,

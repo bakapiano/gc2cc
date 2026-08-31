@@ -22,7 +22,7 @@
 #   }
 
 $base       = 'http://localhost:4141'
-$pagesBase  = 'https://bakapiano.github.io/gc2cc'
+$pagesBase  = 'https://escapecat.github.io/gc2cc'
 $configPath = Join-Path $HOME '.local\share\gc2cc\cxp.json'
 $codexHome  = Join-Path $env:LOCALAPPDATA 'gc2cc\codex-home'
 $proxyService = 'gc2cc-copilot-api'
